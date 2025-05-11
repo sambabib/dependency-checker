@@ -16,16 +16,16 @@
 - `pkg/analyzer`
   - Interface: `Analyze(path string) ([]ReportItem, error)`
   - Implementations per ecosystem:
-    - npm/yarn: parse `package.json` + `package-lock.json` or `yarn.lock`
-    - NuGet: parse `.csproj` or `packages.config`
+    - npm/yarn: parse `package.json` + `package-lock.json` or `yarn.lock` (Implemented for package.json)
+    - NuGet: parse `.csproj` or `packages.config` (Implemented for .csproj)
     - Maven: parse `pom.xml`
     - Pip: parse `requirements.txt` or `Pipfile`
 
 ## 3. Version and Deprecation Checks
 
 - Query public registries:
-  - npm registry API
-  - NuGet V3 API
+  - npm registry API (Implemented)
+  - NuGet V3 API (Implemented)
   - Maven Central
   - PyPI JSON API
 - Determine latest stable and pre-release versions
@@ -59,6 +59,7 @@
   - Parsing manifest files
   - Registry client mocks
   - Report generation logic
+  - NuGetAnalyzer (Comprehensive tests covering various scenarios implemented)
 - Integration tests with sample projects
 
 ## 8. CI/CD Integration
