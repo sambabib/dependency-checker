@@ -6,15 +6,21 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+
 	"github.com/Masterminds/semver/v3"
 )
 
-// NpmAnalyzer implements Analyzer for npm (package.json)
-type NpmAnalyzer struct{}
+const defaultNpmRegistryURL = "https://registry.npmjs.org"
 
-// NewNpmAnalyzer returns a new npm analyzer
-func NewNpmAnalyzer() Analyzer {
-	return &NpmAnalyzer{}
+// NpmAnalyzer analyzes npm project dependencies
+type NpmAnalyzer struct {
+	RegistryURL string // Allow overriding the registry URL for testing
+}
+
+// NewNpmAnalyzer creates a new NpmAnalyzer
+func NewNpmAnalyzer() *NpmAnalyzer {
+	return &NpmAnalyzer{} // RegistryURL will be empty, so default will be used
 }
 
 // packageJSON represents the structure of package.json for dependencies
@@ -31,7 +37,7 @@ func (a *NpmAnalyzer) Analyze(path string) ([]ReportItem, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read package.json: %w", err)
 	}
-	
+
 	var pkg packageJSON
 	if err := json.Unmarshal(data, &pkg); err != nil {
 		return nil, fmt.Errorf("invalid package.json: %w", err)
@@ -47,74 +53,111 @@ func (a *NpmAnalyzer) Analyze(path string) ([]ReportItem, error) {
 	}
 
 	reports := []ReportItem{}
-	for name, current := range allDeps {
-		// Fetch latest version and deprecation info
-		latest, deprecated, err := getLatestVersion(name)
-		if err != nil {
+	for name, currentVersionStr := range allDeps {
+		// Fetch latest version and deprecation status from npm registry
+		currentSemver, errParseCurrent := semver.NewVersion(strings.TrimPrefix(currentVersionStr, "^"))
+		if errParseCurrent != nil {
+			// If current version is not valid semver, we can't do a proper comparison for severity.
+			// We can still report latest and deprecated status.
+			registryURLToUse := a.RegistryURL
+			if registryURLToUse == "" {
+				registryURLToUse = defaultNpmRegistryURL
+			}
+			resp, err := http.Get(fmt.Sprintf("%s/%s", registryURLToUse, name)) // nosemgrep: go.lang.security.audit.net.gosec.G107.G107
+			if err != nil {
+				reports = append(reports, ReportItem{Name: name, CurrentVersion: currentVersionStr, Severity: "error", Compatible: false, LatestVersion: "fetch error", Deprecated: false})
+				continue
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				reports = append(reports, ReportItem{Name: name, CurrentVersion: currentVersionStr, Severity: "error", Compatible: false, LatestVersion: "fetch error", Deprecated: false})
+				continue
+			}
+
+			var pkgInfo struct {
+				DistTags struct {
+					Latest string `json:"latest"`
+				} `json:"dist-tags"`
+				Deprecated string `json:"deprecated"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&pkgInfo); err != nil {
+				reports = append(reports, ReportItem{Name: name, CurrentVersion: currentVersionStr, Severity: "error", Compatible: false, LatestVersion: "parse error", Deprecated: false})
+				continue
+			}
 			reports = append(reports, ReportItem{
 				Name:           name,
-				CurrentVersion: current,
-				LatestVersion:  "unknown",
-				Deprecated:     false,
-				Compatible:     false,
-				Severity:       "error",
+				CurrentVersion: currentVersionStr,
+				LatestVersion:  pkgInfo.DistTags.Latest,
+				Deprecated:     pkgInfo.Deprecated != "",
+				Compatible:     false, // Can't determine without valid current semver
+				Severity:       "unknown", // Or "info" if we just want to report latest
 			})
 			continue
 		}
-		// Determine compatibility and severity
-		compatible, sev := compareVersions(current, latest, deprecated)
+
+		registryURLToUse := a.RegistryURL
+		if registryURLToUse == "" {
+			registryURLToUse = defaultNpmRegistryURL
+		}
+		resp, err := http.Get(fmt.Sprintf("%s/%s", registryURLToUse, name)) // nosemgrep: go.lang.security.audit.net.gosec.G107.G107
+		if err != nil {
+			reports = append(reports, ReportItem{Name: name, CurrentVersion: currentVersionStr, Severity: "error", Compatible: false, LatestVersion: "fetch error", Deprecated: false})
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			reports = append(reports, ReportItem{Name: name, CurrentVersion: currentVersionStr, Severity: "error", Compatible: false, LatestVersion: "fetch error", Deprecated: false})
+			continue
+		}
+
+		var pkgInfo struct {
+			DistTags struct {
+				Latest string `json:"latest"`
+			} `json:"dist-tags"`
+			Deprecated string `json:"deprecated"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&pkgInfo); err != nil {
+			reports = append(reports, ReportItem{Name: name, CurrentVersion: currentVersionStr, Severity: "error", Compatible: false, LatestVersion: "parse error", Deprecated: false})
+			continue
+		}
+
+		latestVersion, err := semver.NewVersion(pkgInfo.DistTags.Latest)
+		if err != nil { // Error parsing latest version from registry
+			reports = append(reports, ReportItem{Name: name, CurrentVersion: currentVersionStr, Severity: "error", Compatible: false, LatestVersion: "N/A", Deprecated: pkgInfo.Deprecated != ""})
+			continue
+		}
+
+		severity, compatible := determineSeverityAndCompatibility(currentSemver, latestVersion)
+
 		reports = append(reports, ReportItem{
 			Name:           name,
-			CurrentVersion: current,
-			LatestVersion:  latest,
-			Deprecated:     deprecated,
+			CurrentVersion: currentVersionStr, // Report the original string from package.json
+			LatestVersion:  pkgInfo.DistTags.Latest,
+			Deprecated:     pkgInfo.Deprecated != "",
 			Compatible:     compatible,
-			Severity:       sev,
+			Severity:       severity,
 		})
 	}
 
 	return reports, nil
 }
 
-// getLatestVersion queries the npm registry for the latest version and deprecation info
-func getLatestVersion(name string) (string, bool, error) {
-	url := fmt.Sprintf("https://registry.npmjs.org/%s/latest", name)
-	resp, err := http.Get(url)
-	if err != nil {
-		return "", false, err
-	}
-	defer resp.Body.Close()
+// determineSeverityAndCompatibility calculates the severity and compatibility based on version differences.
+func determineSeverityAndCompatibility(current, latest *semver.Version) (string, bool) {
+	severity := "ok"
+	compatible := true
 
-	var result struct {
-		Version    string `json:"version"`
-		Deprecated string `json:"deprecated"`
+	if latest.GreaterThan(current) {
+		if latest.Major() > current.Major() {
+			severity = "error" // Major version update, potentially breaking
+			compatible = false
+		} else if latest.Minor() > current.Minor() {
+			severity = "warning" // Minor version update, new features
+		} else {
+			severity = "info" // Patch version update, bug fixes
+		}
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", false, err
-	}
-	isDeprecated := result.Deprecated != ""
-	return result.Version, isDeprecated, nil
-}
-
-// compareVersions uses semver to check compatibility and generate severity
-func compareVersions(current, latest string, deprecated bool) (bool, string) {
-	if deprecated {
-		return false, "warning"
-	}
-	cv, err1 := semver.NewVersion(current)
-	lv, err2 := semver.NewVersion(latest)
-	if err1 != nil || err2 != nil {
-		// Unable to parse versions, assume warning
-		return false, "warning"
-	}
-	// Major version mismatch is breaking change
-	if cv.Major() != lv.Major() {
-		return false, "error"
-	}
-	// Less than latest but same major => warning
-	if cv.LessThan(lv) {
-		return true, "warning"
-	}
-	// Up to date
-	return true, "ok"
+	return severity, compatible
 }
