@@ -17,8 +17,10 @@ import (
 // RegistryPackageInfo is a simplified structure for mock server responses.
 // It defines the fields our mock npm registry will return for a package.
 type RegistryPackageInfo struct {
-	DistTags   struct{ Latest string `json:"latest"` } `json:"dist-tags"`
-	Deprecated string `json:"deprecated,omitempty"` // omitempty: field is omitted from JSON if empty
+	DistTags         struct{ Latest string `json:"latest"` } `json:"dist-tags"`
+	Deprecated       string            `json:"deprecated,omitempty"`
+	PeerDependencies map[string]string `json:"peerDependencies,omitempty"`
+	Version          string            `json:"version,omitempty"` // For specific version fetching if needed
 }
 
 // mockRegistry simulates the npm registry for testing purposes.
@@ -203,4 +205,214 @@ func TestNpmAnalyzer_Analyze_NonSemverCurrentVersion(t *testing.T) {
 	// Since current version isn't semver, compatibility is false and severity is 'unknown'
 	assert.False(t, reports[0].Compatible)
 	assert.Equal(t, "unknown", reports[0].Severity)
+}
+
+func TestNpmAnalyzer_Analyze_PeerDepsMet(t *testing.T) {
+	dir := t.TempDir()
+	packageJSONPath := filepath.Join(dir, "package.json")
+	packageJSONContent := `{
+		"dependencies": {
+			"main-pkg": "1.0.0",
+			"peer-lib": "2.1.0"
+		}
+	}`
+	require.NoError(t, os.WriteFile(packageJSONPath, []byte(packageJSONContent), 0644))
+
+	mockServer := mockRegistry(t, map[string]RegistryPackageInfo{
+		"main-pkg": {
+			DistTags:         struct{ Latest string `json:"latest"` }{Latest: "1.0.0"},
+			PeerDependencies: map[string]string{"peer-lib": "^2.0.0"},
+		},
+		"peer-lib": { // Info for peer-lib itself, though not strictly used by main-pkg's peer check logic directly here
+			DistTags: struct{ Latest string `json:"latest"` }{Latest: "2.1.0"},
+		},
+	})
+	defer mockServer.Close()
+
+	analyzer := NewNpmAnalyzer()
+	analyzer.RegistryURL = mockServer.URL
+
+	reports, err := analyzer.Analyze(dir)
+	require.NoError(t, err)
+	require.Len(t, reports, 2)
+
+	expectedMainPkgReport := ReportItem{
+		Name:           "main-pkg",
+		CurrentVersion: "1.0.0",
+		LatestVersion:  "1.0.0",
+		Deprecated:     false,
+		Compatible:     true, // Peer dep is met
+		Severity:       "ok",
+	}
+	assert.Contains(t, reports, expectedMainPkgReport)
+}
+
+func TestNpmAnalyzer_Analyze_PeerDepsIncompatible(t *testing.T) {
+	dir := t.TempDir()
+	packageJSONPath := filepath.Join(dir, "package.json")
+	packageJSONContent := `{
+		"dependencies": {
+			"main-pkg": "1.0.0",
+			"peer-lib": "1.5.0" 
+		}
+	}`
+	require.NoError(t, os.WriteFile(packageJSONPath, []byte(packageJSONContent), 0644))
+
+	mockServer := mockRegistry(t, map[string]RegistryPackageInfo{
+		"main-pkg": {
+			DistTags:         struct{ Latest string `json:"latest"` }{Latest: "1.0.0"},
+			PeerDependencies: map[string]string{"peer-lib": "^2.0.0"},
+		},
+		"peer-lib": {DistTags: struct{ Latest string `json:"latest"` }{Latest: "1.5.0"}},
+	})
+	defer mockServer.Close()
+
+	analyzer := NewNpmAnalyzer()
+	analyzer.RegistryURL = mockServer.URL
+
+	reports, err := analyzer.Analyze(dir)
+	require.NoError(t, err)
+	require.Len(t, reports, 2)
+
+	expectedMainPkgReport := ReportItem{
+		Name:           "main-pkg",
+		CurrentVersion: "1.0.0",
+		LatestVersion:  "1.0.0",
+		Deprecated:     false,
+		Compatible:     false, // Peer dep is NOT met
+		Severity:       "warning", // Or "error" depending on strictness, current logic makes it warning
+	}
+	var actualMainPkgReport ReportItem
+	for _, r := range reports {
+		if r.Name == "main-pkg" {
+			actualMainPkgReport = r
+			break
+		}
+	}
+	assert.Equal(t, expectedMainPkgReport, actualMainPkgReport)
+}
+
+func TestNpmAnalyzer_Analyze_PeerDepsMissing(t *testing.T) {
+	dir := t.TempDir()
+	packageJSONPath := filepath.Join(dir, "package.json")
+	packageJSONContent := `{
+		"dependencies": {
+			"main-pkg": "1.0.0"
+		}
+	}`
+	require.NoError(t, os.WriteFile(packageJSONPath, []byte(packageJSONContent), 0644))
+
+	mockServer := mockRegistry(t, map[string]RegistryPackageInfo{
+		"main-pkg": {
+			DistTags:         struct{ Latest string `json:"latest"` }{Latest: "1.0.0"},
+			PeerDependencies: map[string]string{"peer-lib": "^2.0.0"},
+		},
+	})
+	defer mockServer.Close()
+
+	analyzer := NewNpmAnalyzer()
+	analyzer.RegistryURL = mockServer.URL
+
+	reports, err := analyzer.Analyze(dir)
+	require.NoError(t, err)
+	require.Len(t, reports, 1)
+
+	expectedMainPkgReport := ReportItem{
+		Name:           "main-pkg",
+		CurrentVersion: "1.0.0",
+		LatestVersion:  "1.0.0",
+		Deprecated:     false,
+		Compatible:     false, // Peer dep is missing
+		Severity:       "error",
+	}
+	assert.Contains(t, reports, expectedMainPkgReport)
+}
+
+func TestNpmAnalyzer_Analyze_PeerDepsInvalidRange(t *testing.T) {
+	dir := t.TempDir()
+	packageJSONPath := filepath.Join(dir, "package.json")
+	packageJSONContent := `{
+		"dependencies": {
+			"main-pkg": "1.0.0",
+			"peer-lib": "2.0.0"
+		}
+	}`
+	require.NoError(t, os.WriteFile(packageJSONPath, []byte(packageJSONContent), 0644))
+
+	mockServer := mockRegistry(t, map[string]RegistryPackageInfo{
+		"main-pkg": {
+			DistTags:         struct{ Latest string `json:"latest"` }{Latest: "1.0.0"},
+			PeerDependencies: map[string]string{"peer-lib": "this-is-not-a-valid-range"},
+		},
+		"peer-lib": {DistTags: struct{ Latest string `json:"latest"` }{Latest: "2.0.0"}},
+	})
+	defer mockServer.Close()
+
+	analyzer := NewNpmAnalyzer()
+	analyzer.RegistryURL = mockServer.URL
+
+	reports, err := analyzer.Analyze(dir)
+	require.NoError(t, err)
+	require.Len(t, reports, 2) // main-pkg and peer-lib
+
+	// Find the main-pkg report
+	var mainPkgReport ReportItem
+	for _, r := range reports {
+		if r.Name == "main-pkg" {
+			mainPkgReport = r
+			break
+		}
+	}
+
+	assert.Equal(t, "main-pkg", mainPkgReport.Name)
+	assert.Equal(t, "1.0.0", mainPkgReport.CurrentVersion)
+	assert.Equal(t, "1.0.0", mainPkgReport.LatestVersion)
+	assert.False(t, mainPkgReport.Deprecated)
+	assert.False(t, mainPkgReport.Compatible) // Incompatible due to problematic peer requirement
+	assert.Equal(t, "warning", mainPkgReport.Severity) // Because the issue is with main-pkg's definition of peer dep
+}
+
+func TestNpmAnalyzer_Analyze_PeerDepsProjectVersionNotSemver(t *testing.T) {
+	dir := t.TempDir()
+	packageJSONPath := filepath.Join(dir, "package.json")
+	packageJSONContent := `{
+		"dependencies": {
+			"main-pkg": "1.0.0",
+			"peer-lib": "git://github.com/some/repo.git#v1.0.0"
+		}
+	}`
+	require.NoError(t, os.WriteFile(packageJSONPath, []byte(packageJSONContent), 0644))
+
+	mockServer := mockRegistry(t, map[string]RegistryPackageInfo{
+		"main-pkg": {
+			DistTags:         struct{ Latest string `json:"latest"` }{Latest: "1.0.0"},
+			PeerDependencies: map[string]string{"peer-lib": "^2.0.0"},
+		},
+		"peer-lib": { // This info isn't strictly used by the test's logic path for main-pkg
+			DistTags: struct{ Latest string `json:"latest"` }{Latest: ""}, // Latest doesn't matter here
+		},
+	})
+	defer mockServer.Close()
+
+	analyzer := NewNpmAnalyzer()
+	analyzer.RegistryURL = mockServer.URL
+
+	reports, err := analyzer.Analyze(dir)
+	require.NoError(t, err)
+	require.Len(t, reports, 2) // main-pkg and peer-lib
+
+	var mainPkgReport ReportItem
+	for _, r := range reports {
+		if r.Name == "main-pkg" {
+			mainPkgReport = r
+			break
+		}
+	}
+
+	assert.Equal(t, "main-pkg", mainPkgReport.Name)
+	assert.Equal(t, "1.0.0", mainPkgReport.CurrentVersion)
+	assert.Equal(t, "1.0.0", mainPkgReport.LatestVersion)
+	assert.False(t, mainPkgReport.Deprecated)
+	assert.False(t, mainPkgReport.Compatible) // Cannot validate semver constraint
+	assert.Equal(t, "warning", mainPkgReport.Severity) // Because we can't parse project's version of peer
 }
