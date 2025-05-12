@@ -7,7 +7,11 @@ type ReportItem struct {
 	LatestVersion  string `json:"latest_version"` // latest version available in the registry
 	Deprecated     bool   `json:"deprecated"` // whether the package is deprecated
 	Compatible     bool   `json:"compatible"` // whether the installed version satisfies peer dependency requirements
-	Severity       string `json:"severity"` // e.g. "ok", "info", "warning", "error"
+	Severity       string `json:"severity"` // e.g., "ok", "info", "warning", "error"
+	// Notes provides additional context or details about the dependency's status,
+	// such as reasons for a package being yanked, errors encountered during analysis (e.g., HTTP errors),
+	// or messages indicating why no stable version was found or if a pinned version was not found in the registry.
+	Notes          string `json:"notes,omitempty"`
 }
 
 // Analyzer defines the interface for dependency analyzers (npm, NuGet, etc.)
