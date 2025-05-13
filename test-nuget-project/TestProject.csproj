@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net6.0</TargetFramework> 
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- An older version -->
+    <PackageReference Include="Newtonsoft.Json" Version="12.0.3" />
+    <!-- A specific version, likely up-to-date or close -->
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="6.0.0" />
+    <!-- A non-existent package -->
+    <PackageReference Include="NonExistent.Nuget.Package.For.Test" Version="1.0.0" />
+    <!-- A deprecated package (example, actual deprecation varies) -->
+    <!-- <PackageReference Include="SomeDeprecatedPackage" Version="1.1.0" /> -->
+  </ItemGroup>
+
+</Project>

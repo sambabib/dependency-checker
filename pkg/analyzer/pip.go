@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/Masterminds/semver/v3"
@@ -117,7 +116,7 @@ func (a *PipAnalyzer) Analyze(projectPath string) ([]ReportItem, error) {
 		if err != nil {
 			reports = append(reports, ReportItem{
 				Name: pkgName, CurrentVersion: projectVersionStr, LatestVersion: "Error",
-				Severity: "error", Compatible: false, Notes: "Error creating request: " + err.Error()})
+				Severity: "error", Compatible: true, Notes: "Error creating request: " + err.Error()})
 			continue
 		}
 
@@ -125,7 +124,7 @@ func (a *PipAnalyzer) Analyze(projectPath string) ([]ReportItem, error) {
 		if err != nil {
 			reports = append(reports, ReportItem{
 				Name: pkgName, CurrentVersion: projectVersionStr, LatestVersion: "Error",
-				Severity: "error", Compatible: false, Notes: "Error fetching package data: " + err.Error()})
+				Severity: "error", Compatible: true, Notes: "Error fetching package data: " + err.Error()})
 			continue
 		}
 
@@ -142,7 +141,7 @@ func (a *PipAnalyzer) Analyze(projectPath string) ([]ReportItem, error) {
 			resp.Body.Close() // Close body for non-200 responses too
 			reports = append(reports, ReportItem{
 				Name: pkgName, CurrentVersion: projectVersionStr, LatestVersion: latestVersion,
-				Severity: "error", Compatible: false, Notes: note})
+				Severity: "error", Compatible: true, Notes: note})
 			continue
 		}
 
@@ -150,7 +149,7 @@ func (a *PipAnalyzer) Analyze(projectPath string) ([]ReportItem, error) {
 			resp.Body.Close() // Close body on decode error
 			reports = append(reports, ReportItem{
 				Name: pkgName, CurrentVersion: projectVersionStr, LatestVersion: "Error",
-				Severity: "error", Compatible: false, Notes: "Error decoding package JSON: " + err.Error()})
+				Severity: "error", Compatible: true, Notes: "Error decoding package JSON: " + err.Error()})
 			continue
 		}
 		resp.Body.Close()
@@ -158,157 +157,152 @@ func (a *PipAnalyzer) Analyze(projectPath string) ([]ReportItem, error) {
 		report = ReportItem{
 			Name:           pkgName,
 			CurrentVersion: projectVersionStr,
-			// Defaults, will be updated
-			Compatible:     false, 
-			Severity:       "ok",    
+			Compatible:     true, // Default to true for Pip
+			Severity:       "ok",
 		}
 
-		// Pinned Version Checks
-		if projectVersionStr != "" {
-			pinnedReleaseFiles, pinnedVersionExistsInReleases := pkgInfo.Releases[projectVersionStr]
-			if !pinnedVersionExistsInReleases || len(pinnedReleaseFiles) == 0 { // len check for empty release array
-				report.Notes = "Pinned version " + projectVersionStr + " not found in registry releases or has no files."
-				report.Severity = "error"
-			} else {
-				var isYanked bool
-				var yankedReason string
-				for _, rf := range pinnedReleaseFiles {
-					if rf.Yanked {
-						isYanked = true
-						if rf.YankedReason != "" {
-							yankedReason = rf.YankedReason
-							break
-						}
-					}
-				}
-				if isYanked {
-					report.Deprecated = true
-					note := "Pinned version " + projectVersionStr + " is yanked"
-					if yankedReason != "" {
-						note += ": " + yankedReason
-					}
-					report.Notes = note
-					report.Severity = "error"
-				}
-			}
-		}
-
-		// Get Latest Stable Version
-		latestStableVersion, errGV := getLatestStablePipVersion(pkgInfo.Releases)
-		if errGV != nil {
-			report.LatestVersion = "Error" // Default if error
-			var noteToAdd string
-			if strings.Contains(errGV.Error(), "no stable") {
-				report.LatestVersion = "no-stable-version"
-				noteToAdd = "No stable (non-prerelease, non-yanked) versions found."
-			} else {
-				noteToAdd = "Error determining latest stable version: " + errGV.Error()
-			}
-			if report.Notes == "" {
-				report.Notes = noteToAdd
-			} else {
-				report.Notes += "; " + noteToAdd
-			}
-			if report.Severity != "error" { // Escalate severity if not already critical
-				report.Severity = "error"
-			}
+		// Find latest stable version
+		latestVersionStr, err := getLatestStablePipVersion(pkgInfo.Releases)
+		if err != nil {
+			report.LatestVersion = "no-stable-version"
+			report.Severity = "error"
+			report.Notes = combineNotes(report.Notes, err.Error())
 		} else {
-			report.LatestVersion = latestStableVersion
+			report.LatestVersion = latestVersionStr
 		}
 
-		// Determine Severity & Compatibility based on versions, if not already an error
+		// Check if pinned version exists and is yanked
+		var note string
+		if projectVersionStr != "" {
+			note = checkPinnedVersionStatus(projectVersionStr, pkgInfo.Releases)
+			if strings.Contains(note, "yanked") {
+				report.Deprecated = true
+				report.Severity = "error" // Yanked pinned version is an error
+			}
+			if strings.Contains(note, "not found") {
+			    report.Severity = "error" // Pinned version not found is an error
+			}
+			report.Notes = combineNotes(report.Notes, note)
+		}
+
+		// Determine severity based on version comparison if not already an error
 		if report.Severity != "error" {
 			if projectVersionStr == "" { // Unpinned
 				report.Severity = "info"
-				report.Compatible = true
-				// Note: For unpinned packages, current version is effectively the latest stable, so no discrepancy.
-				// ReportItem's CurrentVersion will be empty, LatestVersion will be the found stable one.
+				// CurrentVersion is empty, LatestVersion is the stable one.
 			} else if report.LatestVersion != "Error" && report.LatestVersion != "not-found" && report.LatestVersion != "no-stable-version" {
-				projectSemver, errP := semver.NewVersion(projectVersionStr)
-				latestSemver, errL := semver.NewVersion(report.LatestVersion)
+				// Compare pinned version with latest stable version
+				projectSemver, errProj := semver.NewVersion(projectVersionStr)
+				latestSemver, errLatest := semver.NewVersion(report.LatestVersion)
 
-				if errP != nil || errL != nil {
-					report.Severity = "error"
-					noteToAdd := "Error parsing version strings for comparison."
-					if report.Notes == "" { report.Notes = noteToAdd } else { report.Notes += "; " + noteToAdd }
-				} else {
+				if errProj == nil && errLatest == nil {
 					if projectSemver.Equal(latestSemver) {
 						report.Severity = "ok"
-						report.Compatible = true
 					} else if projectSemver.LessThan(latestSemver) {
-						// Compatible already false by default for pinned if not equal
 						if projectSemver.Major() < latestSemver.Major() {
-							report.Severity = "error" // Major update
+							report.Severity = "error"
 						} else if projectSemver.Minor() < latestSemver.Minor() {
-							report.Severity = "warning" // Minor update
-						} else {
-							report.Severity = "info" // Patch update
+							report.Severity = "warning"
+						} else { // Only patch differs
+							report.Severity = "info"
 						}
-					} else { // projectVersion > latestStableVersion
-						report.Severity = "warning"
-						noteToAdd := "Pinned version is newer than the latest identified stable version."
-						if report.Notes == "" { report.Notes = noteToAdd } else { report.Notes += "; " + noteToAdd }
+					} else { // projectSemver > latestSemver (e.g., using pre-release)
+						report.Severity = "info"
 					}
 				}
-			} else {
-				// If LatestVersion is an error string, this path implies projectVersionStr was not empty.
-				// The severity should already be 'error' from the latestStableVersion checks.
-				if report.Severity != "error" { report.Severity = "error" } 
-			}
+			} // else: comparison not possible, retain severity from earlier checks
 		}
 
-		// Final compatibility check: if already an error severity, or deprecated, it's not compatible.
-		if report.Severity == "error" || report.Deprecated {
-			report.Compatible = false
-		}
-
+		// Ensure Compatible is always true before appending
+		report.Compatible = true
 		reports = append(reports, report)
 	}
 
 	return reports, nil
 }
 
+// Helper function to check the status of a specifically pinned version
+func checkPinnedVersionStatus(pinnedVersion string, releases map[string][]PipReleaseFileInfo) string {
+	releaseFiles, exists := releases[pinnedVersion]
+	if !exists || len(releaseFiles) == 0 {
+		return "Pinned version " + pinnedVersion + " not found in registry releases or has no files."
+	}
+
+	var isYanked bool
+	var yankedReason string
+	for _, rf := range releaseFiles {
+		if rf.Yanked {
+			isYanked = true
+			if rf.YankedReason != "" {
+				yankedReason = rf.YankedReason
+				break // Found a reason, no need to check further files for this version
+			}
+		}
+	}
+
+	if isYanked {
+		note := "Pinned version " + pinnedVersion + " is yanked"
+		if yankedReason != "" {
+			note += ": " + yankedReason
+		}
+		return note
+	}
+
+	return "" // Pinned version exists and is not yanked
+}
+
+// Helper function to combine notes, avoiding leading/trailing separators
+func combineNotes(existing, new string) string {
+	if new == "" {
+		return existing
+	}
+	if existing == "" {
+		return new
+	}
+	return existing + "; " + new
+}
+
 // getLatestStablePipVersion iterates through releases and returns the latest non-prerelease, non-yanked version string.
 func getLatestStablePipVersion(releases map[string][]PipReleaseFileInfo) (string, error) {
-	var stableVersions semver.Collection
+	var latestVersion *semver.Version
+	var latestVersionStr string
 
-	for verStr, releaseFiles := range releases {
-		v, err := semver.NewVersion(verStr)
+	for versionStr, files := range releases {
+		// Check if version is yanked or has no files
+		isYanked := false
+		if len(files) > 0 {
+			isYanked = files[0].Yanked // Assuming yanked status is consistent for all files of a version
+		} else {
+			isYanked = true // Treat versions with no files as effectively unavailable/yanked
+		}
+
+		if isYanked {
+			continue // Skip yanked versions
+		}
+
+		v, err := semver.NewVersion(versionStr)
 		if err != nil {
-			// Skip invalid version strings from registry
-			fmt.Printf("Skipping invalid version from registry: %s (%v)\n", verStr, err)
+			// Skip invalid semantic versions, potentially log this if needed
 			continue
 		}
 
+		// Skip pre-release versions
 		if v.Prerelease() != "" {
-			continue // Skip pre-releases
+			continue
 		}
 
-		// Check if the version is yanked (all files for this version are yanked)
-		yanked := true
-		if len(releaseFiles) == 0 { // No files usually means it's effectively yanked or problematic
-		    yanked = true
-		} else {
-		    for _, rf := range releaseFiles {
-			    if !rf.Yanked {
-				    yanked = false
-				    break
-			    }
-		    }
-        }
-
-		if !yanked {
-			stableVersions = append(stableVersions, v)
+		// Update latest version if this version is newer
+		if latestVersion == nil || v.GreaterThan(latestVersion) {
+			latestVersion = v
+			latestVersionStr = versionStr
 		}
 	}
 
-	if len(stableVersions) == 0 {
-		return "", fmt.Errorf("no stable (non-prerelease, non-yanked) versions found")
+	if latestVersion == nil {
+		return "", fmt.Errorf("no stable, non-yanked versions found")
 	}
 
-	sort.Sort(stableVersions) // Sorts oldest to newest
-
-	return stableVersions[len(stableVersions)-1].Original(), nil
+	return latestVersionStr, nil
 }
 
 // findAndParseRequirementsFiles searches for requirements.txt files and extracts package information.

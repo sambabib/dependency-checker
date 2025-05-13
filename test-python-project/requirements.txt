@@ -1,0 +1,7 @@
+# Sample requirements file for testing
+
+django==3.2
+requests
+nonexistent-package-for-test==1.0.0
+
+# End of file
