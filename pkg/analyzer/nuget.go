@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/sambabib/dependency-checker/pkg/logger"
 )
 
 const defaultNuGetRegistryURL = "https://api.nuget.org/v3/index.json" // Service Index
@@ -113,9 +114,11 @@ func (a *NuGetAnalyzer) Analyze(path string) ([]ReportItem, error) {
 	csprojFiles := []string{}
 	err := filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
+			logger.Errorf("NuGet: Error walking directory %s: %v", p, err)
 			return err
 		}
 		if !d.IsDir() && filepath.Ext(p) == ".csproj" {
+			logger.Debugf("NuGet: Found .csproj file: %s", p)
 			csprojFiles = append(csprojFiles, p)
 		}
 		return nil
@@ -126,19 +129,24 @@ func (a *NuGetAnalyzer) Analyze(path string) ([]ReportItem, error) {
 	}
 
 	if len(csprojFiles) == 0 {
-		return nil, fmt.Errorf("no .csproj files found in %s", path)
+		msg := fmt.Sprintf("No .csproj files found in %s", path)
+		logger.Infof("NuGet: %s", msg)
+		return nil, fmt.Errorf("%s", msg)
 	}
 
 	extractedPackages := []extractedPackage{}
 	for _, csprojPath := range csprojFiles {
+		logger.Debugf("NuGet: Analyzing .csproj file: %s", csprojPath)
 		content, err := os.ReadFile(csprojPath)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read .csproj file %s: %w", csprojPath, err)
+			logger.Errorf("NuGet: Failed to read .csproj file %s: %v", csprojPath, err)
+			continue
 		}
 
 		var project CsprojProject
 		if err := xml.Unmarshal(content, &project); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal .csproj file %s: %w", csprojPath, err)
+			logger.Errorf("NuGet: Failed to unmarshal .csproj file %s: %v", csprojPath, err)
+			continue
 		}
 
 		for _, itemGroup := range project.ItemGroups {
@@ -170,7 +178,8 @@ func (a *NuGetAnalyzer) Analyze(path string) ([]ReportItem, error) {
 	}
 
 	// 1. Fetch Service Index to find RegistrationsBaseUrl
-	resp, err := http.Get(registryURLToUse) // nosemgrep: go.lang.security.audit.net.gosec.G107.G107
+	logger.Debugf("NuGet: Fetching service index from %s", registryURLToUse)
+	resp, err := http.Get(registryURLToUse)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch NuGet service index from %s: %w", registryURLToUse, err)
 	}
@@ -197,7 +206,7 @@ func (a *NuGetAnalyzer) Analyze(path string) ([]ReportItem, error) {
 	if registrationsBaseURL == "" {
 		return nil, fmt.Errorf("could not find RegistrationsBaseUrl in NuGet service index at %s", registryURLToUse)
 	}
-	// fmt.Printf("Using NuGet RegistrationsBaseUrl: %s\n", registrationsBaseURL) // For debugging
+	logger.Debugf("NuGet: Using NuGet RegistrationsBaseUrl: %s", registrationsBaseURL)
 
 	reportItems := []ReportItem{}
 
@@ -205,29 +214,25 @@ func (a *NuGetAnalyzer) Analyze(path string) ([]ReportItem, error) {
 		packageID := strings.ToLower(pkg.ID) // NuGet package IDs are case-insensitive in the registry
 		packageURL := fmt.Sprintf("%s%s/index.json", registrationsBaseURL, packageID)
 
-		pkgResp, err := http.Get(packageURL) // nosemgrep: go.lang.security.audit.net.gosec.G107.G107
+		pkgResp, err := http.Get(packageURL)
 		if err != nil {
-			// TODO: Handle this more gracefully, maybe add to report as an error
-			fmt.Printf("Error fetching package %s: %v\n", packageID, err)
+			logger.Errorf("NuGet: Error fetching package %s: %v", packageID, err)
 			continue
 		}
 		defer pkgResp.Body.Close()
 
 		if pkgResp.StatusCode == http.StatusNotFound {
-			fmt.Printf("Package %s not found in registry at %s\n", packageID, packageURL)
-			// TODO: Add to report as 'package not found'
+			logger.Infof("NuGet: Package %s not found in registry at %s", packageID, packageURL)
 			continue
 		}
 		if pkgResp.StatusCode != http.StatusOK {
-			fmt.Printf("Error fetching package %s: status %s\n", packageID, pkgResp.Status)
-			// TODO: Add to report as 'registry error'
+			logger.Errorf("NuGet: Error fetching package %s: status %s", packageID, pkgResp.Status)
 			continue
 		}
 
 		var regIndex NuGetRegistrationIndex
 		if err := json.NewDecoder(pkgResp.Body).Decode(&regIndex); err != nil {
-			fmt.Printf("Error decoding package registration for %s: %v\n", packageID, err)
-			// TODO: Add to report as 'decode error'
+			logger.Errorf("NuGet: Error decoding package registration for %s: %v", packageID, err)
 			continue
 		}
 
@@ -265,16 +270,15 @@ func (a *NuGetAnalyzer) Analyze(path string) ([]ReportItem, error) {
 		}
 
 		if latestStableVersion == nil {
-			fmt.Printf("No stable, listed version found for package %s\n", packageID)
-			// TODO: Add to report as 'no stable version found'
+			logger.Infof("NuGet: No stable, listed version found for package %s", packageID)
 			continue
 		}
 
-		fmt.Printf("Package: %s, ProjectVersion: %s, LatestStable: %s\n", pkg.ID, pkg.Version, latestStableVersion.String())
+		logger.Debugf("NuGet: Package: %s, ProjectVersion: %s, LatestStable: %s", pkg.ID, pkg.Version, latestStableVersion.String())
 		if latestStableCatalogEntry.Deprecation != nil {
-			fmt.Printf("  DEPRECATED: %s\n", latestStableCatalogEntry.Deprecation.Message)
+			logger.Debugf("NuGet:  DEPRECATED: %s", latestStableCatalogEntry.Deprecation.Message)
 			if latestStableCatalogEntry.Deprecation.AlternatePackage != nil {
-				fmt.Printf("  Alternate: %s (Range: %s)\n", 
+				logger.Debugf("NuGet:  Alternate: %s (Range: %s)", 
 					latestStableCatalogEntry.Deprecation.AlternatePackage.ID, 
 					latestStableCatalogEntry.Deprecation.AlternatePackage.Range)
 			}
@@ -327,19 +331,13 @@ func (a *NuGetAnalyzer) Analyze(path string) ([]ReportItem, error) {
 			}
 		}
 
-		// TODO: Add specific ReportItems for 'package not found', 'no stable version', 'registry error', 'decode error'
-		// These would be created in the 'continue' blocks above and appended directly.
-		// For now, if there are issues, they are logged above and the item.Severity/Compatible reflects them.
-		// We could add a Message field to ReportItem if we want to pass these detailed strings.
+		// Add any issues to the Notes field
+		if len(issues) > 0 {
+			item.Notes = strings.Join(issues, "; ")
+		}
 
 		reportItems = append(reportItems, item)
 	}
 
 	return reportItems, nil
 }
-
-// Helper to parse .csproj content (example)
-// func parseCsproj(filePath string) (map[string]string, error) { ... }
-
-// Helper to query NuGet API (example)
-// func queryNuGetAPI(packageID, registryBaseURL string) (latestVersion string, deprecated bool, err error) { ... }

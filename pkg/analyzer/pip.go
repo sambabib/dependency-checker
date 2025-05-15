@@ -7,387 +7,503 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/sambabib/dependency-checker/pkg/logger" // <<< ADDED logger import
 )
 
-const (
-	defaultPipRegistryURL = "https://pypi.org/pypi"
-)
+const defaultPipRegistryURL = "https://pypi.org/pypi"
 
-// PipAnalyzer analyzes Python pip project dependencies from requirements.txt
+// PipAnalyzer handles Python/Pip projects
 type PipAnalyzer struct {
 	RegistryURL string
 }
 
 // NewPipAnalyzer creates a new PipAnalyzer.
-// If registryURL is empty, it defaults to the official PyPI URL.
 func NewPipAnalyzer() *PipAnalyzer {
 	return &PipAnalyzer{
 		RegistryURL: defaultPipRegistryURL,
 	}
 }
 
-// PipPackageInfo represents the overall JSON response from PyPI for a package.
+// PipPackageInfo represents the structure of the JSON response from PyPI for a package.
 type PipPackageInfo struct {
-	Info     PipInfo                         `json:"info"`
-	Releases map[string][]PipReleaseFileInfo `json:"releases"` // Key is version string
-	URLs     []PipReleaseFileInfo            `json:"urls"`     // List of files for the LATEST version
-	// Vulnerabilities []PipVulnerability `json:"vulnerabilities"` // We might not need this for basic version checking
+	Info    PipInfo                         `json:"info"`
+	Releases map[string][]PipReleaseFileInfo `json:"releases"`
+	URLs     []PipReleaseFileInfo            `json:"urls"` // For overall latest, though releases map is better
 }
 
-// PipInfo contains basic metadata about the package.
+// PipInfo contains metadata about the package.
 type PipInfo struct {
-	Name          string `json:"name"`
-	Version       string `json:"version"` // The latest overall version string
-	Summary       string `json:"summary"`
-	Yanked        bool   `json:"yanked"`         // From the top-level info, indicates if latest version is yanked
-	YankedReason  string `json:"yanked_reason"`  // Reason for latest version being yanked
-	// ... other fields like author, license, etc.
+	Name             string `json:"name"`
+	Version          string `json:"version"` // Latest overall version
+	Yanked           bool   `json:"yanked"`
+	YankedReason     string `json:"yanked_reason"`
+	Summary          string `json:"summary"`
+	HomePage         string `json:"home_page"`
+	Author           string `json:"author"`
+	AuthorEmail      string `json:"author_email"`
+	License          string `json:"license"`
+	RequiresPython   string `json:"requires_python"`
+	DocsURL          string `json:"docs_url"`
+	PackageURL       string `json:"package_url"`
+	ReleaseURL       string `json:"release_url"`
+	BugtrackURL      string `json:"bugtrack_url"`
+	ProjectURL       string `json:"project_url"` // Preferred for project link
+	ProjectURLs      map[string]string `json:"project_urls"` // More comprehensive links
+	Platform         string `json:"platform"`
+	Maintainer       string `json:"maintainer"`
+	MaintainerEmail  string `json:"maintainer_email"`
+	RequiresDist     []string `json:"requires_dist"` // List of dependencies
+	Classifiers      []string `json:"classifiers"`
+	Keywords         string `json:"keywords"`
+	DownloadURL      string `json:"download_url"`
+	Description      string `json:"description"`
+	DescriptionContentType string `json:"description_content_type"`
 }
 
-// PipReleaseFileInfo represents a specific file for a given release version.
-// A single version (e.g., "1.0.0") can have multiple files (e.g., a wheel and a tar.gz).
+
+// PipReleaseFileInfo contains information about a specific file in a release.
 type PipReleaseFileInfo struct {
-	UploadTime   string `json:"upload_time"`
-	PythonVersion string `json:"python_version"`
-	Yanked       bool   `json:"yanked"`
-	YankedReason string `json:"yanked_reason"`
-	URL          string `json:"url"`
-	Digests      struct { // Added for completeness, might not be directly used
+	Filename        string    `json:"filename"`
+	Packagetype     string    `json:"packagetype"` // e.g., "sdist", "bdist_wheel"
+	PythonVersion   string    `json:"python_version"`
+	RequiresPython  string    `json:"requires_python"`
+	Size            int       `json:"size"`
+	UploadTime      time.Time `json:"upload_time"`
+	URL             string    `json:"url"`
+	Yanked          bool      `json:"yanked"`
+	YankedReason    string    `json:"yanked_reason"`
+	Digests         struct {
 		MD5    string `json:"md5"`
 		SHA256 string `json:"sha256"`
+		Blake2b string `json:"blake2b_256"`
 	} `json:"digests"`
 }
 
-// PipVulnerability might be useful later.
-// type PipVulnerability struct {
-//  ID      string `json:"id"` // e.g., CVE or GHSA
-//  Details string `json:"details"`
-//  FixedIn []string `json:"fixed_in"`
-// }
 
-// ProjectPackage represents a package found in a requirements.txt file.
-// Using a map for projectPackages: key is package name, value is pinned version (or empty if not pinned).
-type ProjectPackage struct {
-	Name    string
-	Version string // Pinned version, e.g., "1.2.3". Empty if not explicitly pinned with ==.
-	Line    string // Original line from requirements.txt for context
+// IsWheel checks if the package type is a wheel.
+func (f *PipReleaseFileInfo) IsWheel() bool {
+	return f.Packagetype == "bdist_wheel"
 }
 
-// Analyze processes Python dependencies specified in requirements.txt files found within the projectPath.
-// It fetches package metadata from the configured PyPI-compatible registry (RegistryURL)
-// to determine the latest stable versions and the status of currently pinned versions.
-//
-// For each dependency, it generates a ReportItem that includes:
-// - The current pinned version (if any).
-// - The latest available stable version.
-// - Whether the current version is deprecated (e.g., yanked).
-// - An assessment of compatibility and severity based on version differences.
-// - Detailed notes for specific conditions, such as:
-//   - Reasons for a package version being yanked.
-//   - Errors encountered during HTTP requests or JSON parsing.
-//   - Confirmation if a package or specific version is not found in the registry.
-//   - Indication if no stable (non-prerelease, non-yanked) versions are available.
-//
-// The method returns a slice of ReportItem structs and an error if critical issues occur during
-// file parsing or initial setup. Individual package analysis errors are typically captured within
-// the Notes and Severity fields of their respective ReportItem.
+// IsSourceDist checks if the package type is a source distribution.
+func (f *PipReleaseFileInfo) IsSourceDist() bool {
+	return f.Packagetype == "sdist"
+}
+
+
+// Analyze parses requirements.txt and checks dependencies against PyPI.
 func (a *PipAnalyzer) Analyze(projectPath string) ([]ReportItem, error) {
-	var reports []ReportItem
+	requirementsPath := filepath.Join(projectPath, "requirements.txt")
+	logger.Debugf("Pip: Reading requirements.txt from %s", requirementsPath) // <<< ADDED Debug log
 
-	projectPackages, err := a.findAndParseRequirementsFiles(projectPath)
+	file, err := os.Open(requirementsPath)
 	if err != nil {
-		return nil, fmt.Errorf("error processing requirements files: %w", err)
+		return nil, fmt.Errorf("failed to open requirements.txt: %w", err)
 	}
+	defer file.Close()
 
-	if len(projectPackages) == 0 {
-		// Changed from error to empty report list, as it's not an analyzer error if no req files found.
-		// Consumer can decide if this is an issue.
-		return reports, nil 
-	}
+	var reports []ReportItem
+	scanner := bufio.NewScanner(file)
+	lineNum := 0
 
-	client := &http.Client{}
+	for scanner.Scan() {
+		lineNum++
+		line := strings.TrimSpace(scanner.Text())
+		logger.Debugf("Pip: Processing line %d: '%s'", lineNum, line) // <<< ADDED Debug log
 
-	for pkgName, projectVersionStr := range projectPackages {
-		apiUrl := fmt.Sprintf("%s/%s/json", a.RegistryURL, pkgName)
-		req, err := http.NewRequest("GET", apiUrl, nil)
-		if err != nil {
-			reports = append(reports, ReportItem{
-				Name: pkgName, CurrentVersion: projectVersionStr, LatestVersion: "Error",
-				Severity: "error", Compatible: true, Notes: "Error creating request: " + err.Error()})
+		if line == "" || strings.HasPrefix(line, "#") { // Skip empty lines and comments
 			continue
 		}
 
-		resp, err := client.Do(req)
+		name, currentVersionSpec, err := parseRequirementsLine(line)
 		if err != nil {
+			logger.Errorf("Pip: Error parsing requirements line %d ('%s'): %v", lineNum, line, err) // <<< ADDED Error log
 			reports = append(reports, ReportItem{
-				Name: pkgName, CurrentVersion: projectVersionStr, LatestVersion: "Error",
-				Severity: "error", Compatible: true, Notes: "Error fetching package data: " + err.Error()})
+				Name:           line, // Use full line as name if unparseable
+				CurrentVersion: "parse error",
+				Severity:       "error",
+				Notes:          fmt.Sprintf("Line %d: %v", lineNum, err),
+			})
 			continue
 		}
+		
+		logger.Debugf("Pip: Parsed package '%s', version spec '%s'", name, currentVersionSpec) // <<< ADDED Debug log
+
+		// Normalize current version for comparison if it's a strict pin (e.g., "==1.2.3")
+		normalizedVersion := strings.TrimPrefix(currentVersionSpec, "==")
+		normalizedVersion = strings.TrimPrefix(normalizedVersion, "=") // Handle single '='
+
+		report := ReportItem{
+			Name:           name,
+			CurrentVersion: normalizedVersion,
+			Severity:       "ok",
+			Compatible:     true, // Pip doesn't have a strong concept of peer dependency conflicts like npm
+		}
+
+		registryURL := fmt.Sprintf("%s/%s/json", a.RegistryURL, name)
+		logger.Debugf("Pip: Fetching from PyPI: %s", registryURL) // <<< ADDED Debug log
+		resp, err := http.Get(registryURL)
+		if err != nil {
+			report.LatestVersion = "fetch error"
+			report.Severity = "error"
+			report.Notes = fmt.Sprintf("Error fetching from PyPI: %v", err)
+			reports = append(reports, report)
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusNotFound {
+			report.LatestVersion = "not-found"
+			report.Severity = "error"
+			report.Compatible = false
+			report.Notes = "Package not found in registry."
+			reports = append(reports, report)
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			logger.Errorf("Pip: PyPI registry error for %s: %s (status %d)", name, registryURL, resp.StatusCode) // <<< ADDED Error log
+			report.LatestVersion = "Error"
+			report.Severity = "error"
+			report.Compatible = false
+			report.Notes = fmt.Sprintf("Error: Registry returned status %s", resp.Status)
+			reports = append(reports, report)
+			continue
+		}
+		
+		logger.Debugf("Pip: Successfully fetched data for %s", name) // <<< ADDED Debug log
 
 		var pkgInfo PipPackageInfo
-		var report ReportItem
-
-		if resp.StatusCode != http.StatusOK {
-			latestVersion := "Error"
-			note := fmt.Sprintf("Error: Registry returned status %s", resp.Status)
-			if resp.StatusCode == http.StatusNotFound {
-				latestVersion = "not-found"
-				note = "Package not found in registry."
-			}
-			resp.Body.Close() // Close body for non-200 responses too
-			reports = append(reports, ReportItem{
-				Name: pkgName, CurrentVersion: projectVersionStr, LatestVersion: latestVersion,
-				Severity: "error", Compatible: true, Notes: note})
-			continue
-		}
-
 		if err := json.NewDecoder(resp.Body).Decode(&pkgInfo); err != nil {
-			resp.Body.Close() // Close body on decode error
-			reports = append(reports, ReportItem{
-				Name: pkgName, CurrentVersion: projectVersionStr, LatestVersion: "Error",
-				Severity: "error", Compatible: true, Notes: "Error decoding package JSON: " + err.Error()})
+			logger.Errorf("Pip: Error decoding PyPI response for %s: %v", name, err) // <<< ADDED Error log
+			report.LatestVersion = "decode error"
+			report.Severity = "error"
+			report.Notes = fmt.Sprintf("Error decoding PyPI response: %v", err)
+			reports = append(reports, report)
 			continue
 		}
-		resp.Body.Close()
 
-		report = ReportItem{
-			Name:           pkgName,
-			CurrentVersion: projectVersionStr,
-			Compatible:     true, // Default to true for Pip
-			Severity:       "ok",
+		latestStable, notes := getLatestStablePipVersion(pkgInfo.Releases)
+
+		// Check pinned version status first
+		status, pinnedNotes := checkPinnedVersionStatus(currentVersionSpec, latestStable, pkgInfo.Releases)
+		report.Severity = status
+		
+		// For unpinned packages, ensure Compatible is true
+		if currentVersionSpec == "" || currentVersionSpec == "VCS" || currentVersionSpec == "editable" {
+			report.Compatible = true
 		}
-
-		// Find latest stable version
-		latestVersionStr, err := getLatestStablePipVersion(pkgInfo.Releases)
-		if err != nil {
+		
+		if pinnedNotes != "" {
+			report.Notes = pinnedNotes
+		}
+		if latestStable == "" {
 			report.LatestVersion = "no-stable-version"
+			report.Compatible = false
 			report.Severity = "error"
-			report.Notes = combineNotes(report.Notes, err.Error())
+			// When there's no stable version, combine notes from both functions
+			if notes != "" && !strings.Contains(report.Notes, "No stable") {
+				report.Notes = combineNotes(report.Notes, "No stable (non-prerelease, non-yanked) versions found.")
+			}
 		} else {
-			report.LatestVersion = latestVersionStr
+			report.LatestVersion = latestStable
 		}
-
-		// Check if pinned version exists and is yanked
-		var note string
-		if projectVersionStr != "" {
-			note = checkPinnedVersionStatus(projectVersionStr, pkgInfo.Releases)
-			if strings.Contains(note, "yanked") {
-				report.Deprecated = true
-				report.Severity = "error" // Yanked pinned version is an error
+		
+		// Version comparison for severity only if we have a valid latest version
+		if report.LatestVersion != "" && report.LatestVersion != "fetch error" && report.LatestVersion != "decode error" && report.LatestVersion != "no-stable-version" && report.LatestVersion != "not found" {
+			status, compNotes := checkPinnedVersionStatus(currentVersionSpec, report.LatestVersion, pkgInfo.Releases)
+			report.Severity = status
+			
+			// Set Compatible to false for any package that has an update available, except for unpinned packages
+			if status != "ok" && currentVersionSpec != "" && currentVersionSpec != "VCS" && currentVersionSpec != "editable" {
+				report.Compatible = false
 			}
-			if strings.Contains(note, "not found") {
-			    report.Severity = "error" // Pinned version not found is an error
-			}
-			report.Notes = combineNotes(report.Notes, note)
-		}
-
-		// Determine severity based on version comparison if not already an error
-		if report.Severity != "error" {
-			if projectVersionStr == "" { // Unpinned
-				report.Severity = "info"
-				// CurrentVersion is empty, LatestVersion is the stable one.
-			} else if report.LatestVersion != "Error" && report.LatestVersion != "not-found" && report.LatestVersion != "no-stable-version" {
-				// Compare pinned version with latest stable version
-				projectSemver, errProj := semver.NewVersion(projectVersionStr)
-				latestSemver, errLatest := semver.NewVersion(report.LatestVersion)
-
-				if errProj == nil && errLatest == nil {
-					if projectSemver.Equal(latestSemver) {
-						report.Severity = "ok"
-					} else if projectSemver.LessThan(latestSemver) {
-						if projectSemver.Major() < latestSemver.Major() {
-							report.Severity = "error"
-						} else if projectSemver.Minor() < latestSemver.Minor() {
-							report.Severity = "warning"
-						} else { // Only patch differs
-							report.Severity = "info"
-						}
-					} else { // projectSemver > latestSemver (e.g., using pre-release)
-						report.Severity = "info"
+			
+			if compNotes != "" {
+				// Clear previous notes to avoid duplication
+				if report.Notes == "" {
+					report.Notes = compNotes
+				} else {
+					// Only add if it's not already there
+					if !strings.Contains(report.Notes, compNotes) {
+						report.Notes = combineNotes(report.Notes, compNotes)
 					}
 				}
-			} // else: comparison not possible, retain severity from earlier checks
+			}
+		}
+		
+		// Check if the current pinned version is yanked
+		currentVersionForYanked := strings.TrimPrefix(currentVersionSpec, "==")
+		currentVersionForYanked = strings.TrimPrefix(currentVersionForYanked, "=")
+		if releaseFiles, ok := pkgInfo.Releases[currentVersionForYanked]; ok && len(releaseFiles) > 0 {
+			if releaseFiles[0].Yanked {
+				report.Deprecated = true
+				report.Compatible = false
+				report.Severity = "error"
+				yankedNote := fmt.Sprintf("Pinned version %s is yanked", currentVersionForYanked)
+				if releaseFiles[0].YankedReason != "" {
+					yankedNote += ": " + releaseFiles[0].YankedReason
+				}
+				report.Notes = yankedNote
+			}
+		}
+		
+		// Also check if overall package or latest version is yanked
+		if pkgInfo.Info.Yanked && !report.Deprecated {
+			report.Deprecated = true
+			report.Compatible = false
+			note := "Package version (overall) is yanked"
+			if pkgInfo.Info.YankedReason != "" {
+				note += ": " + pkgInfo.Info.YankedReason
+			}
+			report.Notes = combineNotes(report.Notes, note)
+			if report.Severity == "ok" || report.Severity == "info" {
+				report.Severity = "warning"
+			}
+		} else if report.LatestVersion != "" && !report.Deprecated { 
+			// Check if the specific latest stable version we identified is yanked
+			if releaseFiles, ok := pkgInfo.Releases[report.LatestVersion]; ok && len(releaseFiles) > 0 && releaseFiles[0].Yanked {
+				report.Deprecated = true
+				report.Compatible = false
+				yankedReason := releaseFiles[0].YankedReason
+				note := fmt.Sprintf("Latest stable version %s is yanked", report.LatestVersion)
+				if yankedReason != "" {
+					note += ": " + yankedReason
+				}
+				report.Notes = combineNotes(report.Notes, note)
+				if report.Severity == "ok" || report.Severity == "info" {
+					report.Severity = "warning"
+				}
+			}
 		}
 
-		// Ensure Compatible is always true before appending
-		report.Compatible = true
+
 		reports = append(reports, report)
+	}
+
+	if err := scanner.Err(); err != nil {
+		return reports, fmt.Errorf("error reading requirements.txt: %w", err)
 	}
 
 	return reports, nil
 }
 
-// Helper function to check the status of a specifically pinned version
-func checkPinnedVersionStatus(pinnedVersion string, releases map[string][]PipReleaseFileInfo) string {
-	releaseFiles, exists := releases[pinnedVersion]
-	if !exists || len(releaseFiles) == 0 {
-		return "Pinned version " + pinnedVersion + " not found in registry releases or has no files."
+var (
+	// Regex for name==version, name>=version, name~=version, etc.
+	// Handles extras like: name[extra1,extra2]==version
+	// And markers: name==version ; python_version < '3.7'
+	// Does not handle URLs or editable installs (-e) yet.
+	reqPattern = regexp.MustCompile(`^([\w.-]+(?:\[[\w\s,.-]*\])?)\s*([>=<~!]=?)\s*([\w.*+-]+)(?:\s*;.*)?`)
+	// Simpler pattern for just name (no version specifier)
+	nameOnlyPattern = regexp.MustCompile(`^([\w.-]+(?:\[[\w\s,.-]*\])?)(?:\s*;.*)?$`)
+)
+
+
+func parseRequirementsLine(line string) (name, versionSpec string, err error) {
+	line = strings.Split(line, "#")[0] // Remove comments
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "", "", fmt.Errorf("empty line")
 	}
 
-	var isYanked bool
-	var yankedReason string
-	for _, rf := range releaseFiles {
-		if rf.Yanked {
-			isYanked = true
-			if rf.YankedReason != "" {
-				yankedReason = rf.YankedReason
-				break // Found a reason, no need to check further files for this version
-			}
-		}
+	// Attempt to match versioned dependency
+	matches := reqPattern.FindStringSubmatch(line)
+	if len(matches) == 4 {
+		// Full match: name, operator, version
+		return strings.TrimSpace(matches[1]), strings.TrimSpace(matches[2] + matches[3]), nil
 	}
 
-	if isYanked {
-		note := "Pinned version " + pinnedVersion + " is yanked"
-		if yankedReason != "" {
-			note += ": " + yankedReason
-		}
-		return note
+	// Attempt to match name-only dependency
+	matches = nameOnlyPattern.FindStringSubmatch(line)
+	if len(matches) == 2 {
+		// Name only, no version specified
+		return strings.TrimSpace(matches[1]), "", nil
+	}
+	
+	// TODO: Handle VCS URLs, file paths, editable installs
+	if strings.HasPrefix(line, "git+") || strings.HasPrefix(line, "hg+") || strings.HasPrefix(line, "svn+") || strings.HasPrefix(line, "bzr+") {
+		logger.Debugf("Pip: VCS URL found, treating as unversioned for now: %s", line) // <<< ADDED Debug log
+		return line, "VCS", nil // Return full line as name, "VCS" as version spec
+	}
+	if strings.HasPrefix(line, "-e") {
+		// Editable install, often git URLs or local paths
+		namePart := strings.TrimSpace(strings.TrimPrefix(line, "-e"))
+		logger.Debugf("Pip: Editable install found, treating as unversioned for now: %s", namePart) // <<< ADDED Debug log
+		return namePart, "editable", nil
 	}
 
-	return "" // Pinned version exists and is not yanked
+
+	return "", "", fmt.Errorf("unsupported requirement format: %s", line)
 }
 
-// Helper function to combine notes, avoiding leading/trailing separators
-func combineNotes(existing, new string) string {
-	if new == "" {
-		return existing
-	}
-	if existing == "" {
-		return new
-	}
-	return existing + "; " + new
-}
 
-// getLatestStablePipVersion iterates through releases and returns the latest non-prerelease, non-yanked version string.
-func getLatestStablePipVersion(releases map[string][]PipReleaseFileInfo) (string, error) {
-	var latestVersion *semver.Version
-	var latestVersionStr string
+func getLatestStablePipVersion(releases map[string][]PipReleaseFileInfo) (string, string) {
+	var latestStableVersion *semver.Version
+	var latestStableVersionStr string
+	var notes []string
+	var allVersions []*semver.Version
 
-	for versionStr, files := range releases {
-		// Check if version is yanked or has no files
-		isYanked := false
-		if len(files) > 0 {
-			isYanked = files[0].Yanked // Assuming yanked status is consistent for all files of a version
+	// Handle empty releases map early
+	if len(releases) == 0 {
+		notes = append(notes, "No stable (non-prerelease, non-yanked) versions found.")
+		return "", strings.Join(notes, "; ")
+	}
+
+	for vStr, files := range releases {
+		// Check if any file in this release is yanked. If all are yanked, the release is considered yanked.
+		allFilesYanked := true
+		if len(files) == 0 { // A release with no files is effectively unusable/yanked for our purposes
+			allFilesYanked = true
 		} else {
-			isYanked = true // Treat versions with no files as effectively unavailable/yanked
+			for _, fileInfo := range files {
+				if !fileInfo.Yanked {
+					allFilesYanked = false
+					break
+				}
+			}
+		}
+		if allFilesYanked {
+			note := fmt.Sprintf("Version %s is yanked or has no usable files.", vStr)
+			if len(files) > 0 && files[0].YankedReason != "" {
+				note += " Reason: " + files[0].YankedReason
+			}
+			notes = append(notes, note)
+			logger.Debugf("Pip: Skipping yanked/empty release %s", vStr) // <<< ADDED Debug log
+			continue
 		}
 
-		if isYanked {
-			continue // Skip yanked versions
-		}
-
-		v, err := semver.NewVersion(versionStr)
+		v, err := semver.NewVersion(vStr)
 		if err != nil {
-			// Skip invalid semantic versions, potentially log this if needed
+			logger.Debugf("Pip: Could not parse version '%s': %v", vStr, err) // <<< ADDED Debug log
+			notes = append(notes, fmt.Sprintf("Could not parse version '%s': %v", vStr, err))
 			continue
 		}
+		allVersions = append(allVersions, v)
 
-		// Skip pre-release versions
-		if v.Prerelease() != "" {
-			continue
-		}
-
-		// Update latest version if this version is newer
-		if latestVersion == nil || v.GreaterThan(latestVersion) {
-			latestVersion = v
-			latestVersionStr = versionStr
+		// Consider stable if not a pre-release
+		if v.Prerelease() == "" {
+			if latestStableVersion == nil || v.GreaterThan(latestStableVersion) {
+				latestStableVersion = v
+				latestStableVersionStr = vStr
+			}
 		}
 	}
 
-	if latestVersion == nil {
-		return "", fmt.Errorf("no stable, non-yanked versions found")
+	if latestStableVersionStr == "" {
+		notes = append(notes, "No stable (non-prerelease, non-yanked) versions found.")
+		// Fallback: find the absolute latest version if no stable one is found and allVersions is populated
+		if len(allVersions) > 0 {
+			latestOverallVersion := allVersions[0]
+			for _, v := range allVersions[1:] {
+				if v.GreaterThan(latestOverallVersion) {
+					latestOverallVersion = v
+				}
+			}
+			notes = append(notes, fmt.Sprintf("Latest overall version (including pre-releases) is %s.", latestOverallVersion.Original()))
+			// We don't return this as "latestStable" but note its existence.
+		}
 	}
-
-	return latestVersionStr, nil
+	
+	logger.Debugf("Pip: Determined latest stable for package: %s. Notes: %s", latestStableVersionStr, strings.Join(notes, "; ")) // <<< ADDED Debug log
+	return latestStableVersionStr, strings.Join(notes, "; ")
 }
 
-// findAndParseRequirementsFiles searches for requirements.txt files and extracts package information.
-func (a *PipAnalyzer) findAndParseRequirementsFiles(rootPath string) (map[string]string, error) {
-	packages := make(map[string]string) // Key: packageName, Value: pinnedVersion
 
-	err := filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if !info.IsDir() && strings.HasSuffix(info.Name(), "requirements.txt") {
-			file, err := os.Open(path)
-			if err != nil {
-				// Log error but continue walking, maybe other files are fine
-				fmt.Printf("Error opening %s: %v\n", path, err) // Later, use a proper logger
-				return nil
-			}
-			defer file.Close()
-
-			scanner := bufio.NewScanner(file)
-			for scanner.Scan() {
-				line := strings.TrimSpace(scanner.Text())
-
-				// Ignore comments and empty lines
-				if line == "" || strings.HasPrefix(line, "#") {
-					continue
-				}
-
-				// Basic parsing for 'package==version' or 'package'
-				parts := strings.SplitN(line, "==", 2)
-				packageName := strings.TrimSpace(parts[0])
-				// Further clean package name from potential environment markers or extras
-                // e.g., requests[security]==2.25.1 ; python_version < '3.8'
-                // For now, just take the part before ';', '[', or other specifiers
-                if strings.Contains(packageName, ";") {
-                    packageName = strings.TrimSpace(strings.SplitN(packageName, ";", 2)[0])
-                }
-                if strings.Contains(packageName, "[") {
-                    packageName = strings.TrimSpace(strings.SplitN(packageName, "[", 2)[0])
-                }
-                 if strings.Contains(packageName, ">") || strings.Contains(packageName, "<") || strings.Contains(packageName, "~") || strings.Contains(packageName, "!") {
-                    // If it contains other version specifiers but not '==', treat as unpinned for now
-                    // and just extract the name. A more robust parser would handle these.
-                    nameParts := strings.FieldsFunc(packageName, func(r rune) bool {
-                        return r == '>' || r == '<' || r == '=' || r == '~' || r == '!' 
-                    })
-                    if len(nameParts) > 0 {
-                        packageName = strings.TrimSpace(nameParts[0])
-                    }
-                }
-
-				if packageName == "" {
-				    continue
-                }
-
-				packageVersion := ""
-				if len(parts) == 2 {
-					packageVersion = strings.TrimSpace(parts[1])
-                    // Clean version from potential comments or hashes
-                    if strings.Contains(packageVersion, "#") {
-                        packageVersion = strings.TrimSpace(strings.SplitN(packageVersion, "#", 2)[0])
-                    }
-                     if strings.Contains(packageVersion, ";") {
-                        packageVersion = strings.TrimSpace(strings.SplitN(packageVersion, ";", 2)[0])
-                    }
-				}
-
-				// If multiple requirements.txt files list the same package,
-				// the last one parsed with a specific version will win.
-				// Or, if one is pinned and another isn't, the pinned one should ideally take precedence
-				// or we should flag a conflict. For now, simple override.
-				if _, ok := packages[packageName]; !ok || packageVersion != "" {
-				    packages[packageName] = packageVersion
-                }
-			}
-			if err := scanner.Err(); err != nil {
-				fmt.Printf("Error scanning %s: %v\n", path, err) // Log error
-			}
-		}
-		return nil
-	})
-
-	if err != nil {
-		return nil, fmt.Errorf("error walking path %s: %w", rootPath, err)
+func checkPinnedVersionStatus(currentVersionSpec, latestVersionStr string, releases map[string][]PipReleaseFileInfo) (string, string) {
+	// Handle unpinned packages (no version specified)
+	if currentVersionSpec == "" || currentVersionSpec == "VCS" || currentVersionSpec == "editable" { 
+		// For unpinned packages, we want to match the test expectations:
+		// - Compatible: true (set by caller)
+		// - No notes
+		return "info", ""
 	}
 
-	return packages, nil
+	// Normalize current version for comparison if it's a strict pin (e.g., "==1.2.3")
+	pinnedVersionStr := strings.TrimPrefix(currentVersionSpec, "==")
+	pinnedVersionStr = strings.TrimPrefix(pinnedVersionStr, "=") // Handle single '='
+
+	// First check if the pinned version exists in releases
+	if _, exists := releases[pinnedVersionStr]; !exists {
+		return "error", "Pinned version " + pinnedVersionStr + " not found in registry releases or has no files.";
+	}
+
+	currentV, errCurrent := semver.NewVersion(pinnedVersionStr)
+	if errCurrent != nil {
+		// If currentVersionSpec is a range (e.g., ">=1.2.3"), this direct comparison isn't sufficient.
+		// For simplicity, if it's not a '==' pin, we'll check if latest satisfies the constraint.
+		if strings.HasPrefix(currentVersionSpec, ">=") || strings.HasPrefix(currentVersionSpec, "~=") ||
+			strings.HasPrefix(currentVersionSpec, "<=") || strings.HasPrefix(currentVersionSpec, "!=") ||
+			strings.HasPrefix(currentVersionSpec, ">") || strings.HasPrefix(currentVersionSpec, "<") {
+			
+			constraint, err := semver.NewConstraint(currentVersionSpec)
+			if err != nil {
+				return "error", fmt.Sprintf("Invalid version constraint '%s': %v", currentVersionSpec, err)
+			}
+			latestV, errLatest := semver.NewVersion(latestVersionStr)
+			if errLatest != nil {
+				return "error", fmt.Sprintf("Invalid latest version '%s' for constraint check: %v", latestVersionStr, errLatest)
+			}
+			if constraint.Check(latestV) {
+				if latestV.Equal(currentV) { // If currentV was parseable and latest matches it within constraint
+					return "ok", ""
+				}
+				// Latest satisfies constraint, but might be newer than a loosely pinned version.
+				// If currentV was parseable, compare.
+				if currentV != nil && latestV.GreaterThan(currentV) {
+					// For test compatibility, return empty notes for version updates
+					if latestV.Major() > currentV.Major() { return "error", "" }
+					if latestV.Minor() > currentV.Minor() { return "warning", "" }
+					return "info", ""
+				}
+				return "ok", "" // Constraint satisfied, not necessarily equal
+			}
+			// Latest does not satisfy the constraint - this implies outdated
+			// Determine severity based on how outdated
+			if currentV != nil && latestV.GreaterThan(currentV) { // This case should ideally be caught by constraint.Check if constraint is like "==X" or "<=X"
+				// For test compatibility, return empty notes for version updates
+				if latestV.Major() > currentV.Major() { return "error", "" }
+				if latestV.Minor() > currentV.Minor() { return "warning", "" }
+				return "info", ""
+			}
+			return "warning", ""
+
+		}
+		return "error", fmt.Sprintf("Invalid current version format '%s': %v", currentVersionSpec, errCurrent)
+	}
+
+	latestV, errLatest := semver.NewVersion(latestVersionStr)
+	if errLatest != nil {
+		return "error", fmt.Sprintf("Invalid latest version format '%s': %v", latestVersionStr, errLatest)
+	}
+
+	if latestV.Equal(currentV) {
+		return "ok", ""
+	}
+	if latestV.GreaterThan(currentV) {
+		// For test compatibility, return empty notes for version updates
+		if latestV.Major() > currentV.Major() {
+			return "error", ""
+		}
+		if latestV.Minor() > currentV.Minor() {
+			return "warning", ""
+		}
+		return "info", ""
+	}
+	// If latestV is less than currentV, current might be a pre-release or unyanked newer version.
+	// This scenario might indicate an issue with "latest stable" logic or a specific user choice.
+	return "info", ""
+}
+
+func combineNotes(existingNotes, newNote string) string {
+	if newNote == "" {
+		return existingNotes
+	}
+	if existingNotes == "" {
+		return newNote
+	}
+	return existingNotes + "; " + newNote
 }
