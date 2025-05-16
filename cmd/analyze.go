@@ -1,76 +1,125 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 	"github.com/sambabib/dependency-checker/pkg/analyzer"
+	"github.com/sambabib/dependency-checker/pkg/config"
+	"github.com/sambabib/dependency-checker/pkg/logger"
+	"github.com/sambabib/dependency-checker/pkg/output"
 )
 
-var analyzePath string
-var format string // output format: text or json
+var (
+	analyzePath  string
+	outputFormat string
+	outputFile   string
+	configFile   string
+	verbose      bool
+)
 
-// analyzeCmd represents the analyze subcommand
 var analyzeCmd = &cobra.Command{
 	Use:   "analyze",
 	Short: "Analyze project dependencies",
-	Long:  "Analyze the project's dependencies and report outdated or deprecated packages.",
+	Long:  `Analyze project dependencies to check for outdated, incompatible, or problematic packages.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		var reports []analyzer.ReportItem
-		var err error
-		var projectType string
+		logger.SetVerbose(verbose)
 
-		// --- Detect Project Type & Run Analyzer ---
-		pkgFile := filepath.Join(analyzePath, "package.json")
-		if _, errStat := os.Stat(pkgFile); errStat == nil {
+		if analyzePath == "" {
+			return fmt.Errorf("project path must be specified with -p or --path")
+		}
+
+		// Load configuration
+		var cfg *config.Config
+		var configErr error
+		
+		if configFile != "" {
+			// Use specified config file if provided
+			cfg, configErr = config.LoadConfig(configFile)
+			if configErr != nil {
+				return fmt.Errorf("error loading configuration from %s: %w", configFile, configErr)
+			}
+			logger.Debugf("Loaded configuration from %s", configFile)
+		} else {
+			// Otherwise, try to find a config file in the project directory
+			cfg, configErr = config.FindAndLoadConfig(analyzePath)
+			if configErr != nil {
+				return fmt.Errorf("error finding/loading configuration: %w", configErr)
+			}
+			logger.Debugf("Using configuration from project directory or defaults")
+		}
+
+		// Command-line flags override config file
+		if outputFormat != "" {
+			cfg.Output.Format = outputFormat
+		}
+		if outputFile != "" {
+			cfg.Output.File = outputFile
+		}
+
+		var reports []analyzer.ReportItem
+		var analyzeErr error
+		projectType := ""
+
+		logger.Debugf("Starting analysis for path: %s", analyzePath)
+
+		// Check for npm project
+		if _, errStat := os.Stat(filepath.Join(analyzePath, "package.json")); errStat == nil {
 			projectType = "npm"
-			fmt.Printf("Detected npm project at %s\n", analyzePath)
+			logger.Infof("Detected npm project at %s", analyzePath)
 			a := analyzer.NewNpmAnalyzer()
-			reports, err = a.Analyze(analyzePath)
-			if err != nil {
-				return fmt.Errorf("npm analysis failed: %w", err)
+			reports, analyzeErr = a.Analyze(analyzePath)
+			if analyzeErr != nil {
+				return fmt.Errorf("npm analysis failed: %w", analyzeErr)
 			}
 		} else {
-			// Check for .NET/NuGet project by presence of .csproj files
-			// (Simplified detection; analyzer does a deeper search)
-			csprojFiles, _ := filepath.Glob(filepath.Join(analyzePath, "*.csproj"))
-			if len(csprojFiles) == 0 {
-				_ = filepath.WalkDir(analyzePath, func(path string, d os.DirEntry, walkErr error) error {
-					if walkErr != nil { return walkErr }
-					if !d.IsDir() && filepath.Ext(d.Name()) == ".csproj" {
-						csprojFiles = append(csprojFiles, path)
-						return filepath.SkipDir
-					}
-					return nil
-				})
-			}
+			// Check for .NET project
+			var csprojFiles []string
+			logger.Debugf("Checking for .csproj files in %s", analyzePath)
+			_ = filepath.WalkDir(analyzePath, func(path string, d os.DirEntry, walkErr error) error {
+				if walkErr != nil {
+					logger.Debugf("Error walking directory %s: %v", path, walkErr)
+					return walkErr
+				}
+				if !d.IsDir() && strings.HasSuffix(d.Name(), ".csproj") {
+					logger.Debugf("Found .csproj file: %s", path)
+					csprojFiles = append(csprojFiles, path)
+					// We can stop after finding the first one if we assume one project per directory for now
+					// Or collect all and decide how to handle multi-project dirs
+					return filepath.SkipDir // Optimization: if we only care if *any* csproj exists in root or immediate subdirs
+				}
+				return nil
+			})
 
 			if len(csprojFiles) > 0 {
 				projectType = "nuget"
-				fmt.Printf("Detected .NET project in %s (found .csproj files)\n", analyzePath)
+				logger.Infof("Detected .NET project in %s (found .csproj files)", analyzePath)
 				a := analyzer.NewNuGetAnalyzer()
-				reports, err = a.Analyze(analyzePath)
-				if err != nil {
-					return fmt.Errorf("nuget analysis failed: %w", err)
+				reports, analyzeErr = a.Analyze(analyzePath)
+				if analyzeErr != nil {
+					return fmt.Errorf("nuget analysis failed: %w", analyzeErr)
 				}
 			} else {
 				// Check for Python/Pip project by presence of requirements.txt
 				var reqFiles []string
 				rootReq := filepath.Join(analyzePath, "requirements.txt")
+				logger.Debugf("Checking for requirements.txt at %s", rootReq)
 				if _, errStat := os.Stat(rootReq); errStat == nil {
+					logger.Debugf("Found requirements.txt at root: %s", rootReq)
 					reqFiles = append(reqFiles, rootReq)
 				} else {
-					// Also check subdirectories, though less common for the primary file
+					logger.Debugf("Root requirements.txt not found, checking subdirectories of %s", analyzePath)
 					_ = filepath.WalkDir(analyzePath, func(path string, d os.DirEntry, walkErr error) error {
-						if walkErr != nil { return walkErr }
+						if walkErr != nil {
+							logger.Debugf("Error walking directory %s: %v", path, walkErr)
+							return walkErr
+						}
 						if !d.IsDir() && d.Name() == "requirements.txt" {
+							logger.Debugf("Found requirements.txt in subdir: %s", path)
 							reqFiles = append(reqFiles, path)
-							// Don't SkipDir, might be multiple (though PipAnalyzer handles this)
 						}
 						return nil
 					})
@@ -78,73 +127,99 @@ var analyzeCmd = &cobra.Command{
 
 				if len(reqFiles) > 0 {
 					projectType = "pip"
-					fmt.Printf("Detected Python project in %s (found requirements.txt)\n", analyzePath)
+					logger.Infof("Detected Python project in %s (found requirements.txt)", analyzePath)
 					a := analyzer.NewPipAnalyzer()
-					reports, err = a.Analyze(analyzePath)
-					if err != nil {
-						return fmt.Errorf("pip analysis failed: %w", err)
+					reports, analyzeErr = a.Analyze(analyzePath)
+					if analyzeErr != nil {
+						return fmt.Errorf("pip analysis failed: %w", analyzeErr)
 					}
 				} else {
-					return fmt.Errorf("no supported manifest found in %s (checked for package.json, *.csproj, requirements.txt)", analyzePath)
+					// Check for Maven/Java project by presence of pom.xml
+					var pomFiles []string
+					rootPom := filepath.Join(analyzePath, "pom.xml")
+					logger.Debugf("Checking for pom.xml at %s", rootPom)
+					if _, errStat := os.Stat(rootPom); errStat == nil {
+						logger.Debugf("Found pom.xml at root: %s", rootPom)
+						pomFiles = append(pomFiles, rootPom)
+					} else {
+						logger.Debugf("Root pom.xml not found, checking subdirectories of %s", analyzePath)
+						_ = filepath.WalkDir(analyzePath, func(path string, d os.DirEntry, walkErr error) error {
+							if walkErr != nil {
+								logger.Debugf("Error walking directory %s: %v", path, walkErr)
+								return walkErr
+							}
+							if !d.IsDir() && d.Name() == "pom.xml" {
+								logger.Debugf("Found pom.xml in subdir: %s", path)
+								pomFiles = append(pomFiles, path)
+							}
+							return nil
+						})
+					}
+
+					if len(pomFiles) > 0 {
+						projectType = "maven"
+						logger.Infof("Detected Maven project in %s (found pom.xml)", analyzePath)
+						a := analyzer.NewMavenAnalyzer()
+						reports, analyzeErr = a.Analyze(analyzePath)
+						if analyzeErr != nil {
+							return fmt.Errorf("maven analysis failed: %w", analyzeErr)
+						}
+					} else {
+						emsg := fmt.Sprintf("no supported manifest found in %s (checked for package.json, *.csproj, requirements.txt, pom.xml)", analyzePath)
+						logger.Errorf("%s", emsg)
+						return fmt.Errorf("%s", emsg)
+					}
 				}
 			}
 		}
 
+		logger.Debugf("Analysis complete. Project type: '%s'. Found %d report items.", projectType, len(reports))
+
 		// --- Output Report ---
-		if format == "json" {
-			out, errJson := json.MarshalIndent(reports, "", "  ")
-			if errJson != nil {
-				return fmt.Errorf("failed to marshal report to JSON: %w", errJson)
+		var outputData []byte
+		var outputErr error
+
+		switch strings.ToLower(cfg.Output.Format) {
+		case "json":
+			outputData, outputErr = output.GenerateJSONReport(reports)
+			if outputErr != nil {
+				return fmt.Errorf("failed to generate JSON report: %w", outputErr)
 			}
-			fmt.Println(string(out))
-		} else { // Default to text format
-			if len(reports) > 0 {
-				printTextReport(reports)
-			} else {
-				fmt.Println("No dependencies found or analyzed for project type:", projectType)
+		case "sarif":
+			outputData, outputErr = output.GenerateSarifReport(reports, analyzePath)
+			if outputErr != nil {
+				return fmt.Errorf("failed to generate SARIF report: %w", outputErr)
 			}
+		default: // "text" or any other value
+			if cfg.Output.File != "" {
+				return fmt.Errorf("text format can only be output to stdout")
+			}
+			output.PrintTextReport(reports)
+			return nil
+		}
+
+		// Write output to file or stdout
+		if cfg.Output.File != "" {
+			if writeErr := os.WriteFile(cfg.Output.File, outputData, 0644); writeErr != nil {
+				return fmt.Errorf("failed to write output to file: %w", writeErr)
+			}
+			logger.Infof("Report written to %s", cfg.Output.File)
+		} else {
+			fmt.Println(string(outputData))
 		}
 
 		return nil
 	},
 }
 
-// printTextReport formats and prints the dependency analysis report as a table.
-func printTextReport(reports []analyzer.ReportItem) {
-	const notesLimit = 60 // Max characters for notes column
 
-	// Initialize tabwriter
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0) // minwidth, tabwidth, padding, padchar, flags
-
-	// Print header
-	fmt.Fprintln(w, "NAME\tCURRENT\tLATEST\tSEVERITY\tCOMPAT\tDEPREC\tNOTES")
-	fmt.Fprintln(w, "----\t-------\t------\t--------\t------\t------\t-----")
-
-	// Print data rows
-	for _, r := range reports {
-		notes := r.Notes
-		if len(notes) > notesLimit {
-			notes = notes[:notesLimit-3] + "..."
-		}
-		notes = strings.ReplaceAll(notes, "\t", " ") // Replace tabs to avoid breaking alignment
-
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%t\t%t\t%s\n",
-			r.Name,
-			r.CurrentVersion,
-			r.LatestVersion,
-			r.Severity,
-			r.Compatible,
-			r.Deprecated,
-			notes,
-		)
-	}
-
-	// Flush the writer to print the table
-	w.Flush()
-}
 
 func init() {
 	rootCmd.AddCommand(analyzeCmd)
-	analyzeCmd.Flags().StringVarP(&analyzePath, "path", "p", ".", "Path to project directory to analyze")
-	analyzeCmd.Flags().StringVarP(&format, "format", "f", "text", "Output format: text or json")
+	analyzeCmd.Flags().StringVarP(&analyzePath, "path", "p", "", "Path to the project directory to analyze (required)")
+	analyzeCmd.Flags().StringVarP(&outputFormat, "format", "f", "", "Output format ('text', 'json', or 'sarif')")
+	analyzeCmd.Flags().StringVarP(&outputFile, "output", "o", "", "Output file path (stdout if not specified)")
+	analyzeCmd.Flags().StringVarP(&configFile, "config", "c", "", "Path to configuration file (.depcheck.yaml)")
+	analyzeCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose logging")
+	_ = analyzeCmd.MarkFlagRequired("path")
 }
