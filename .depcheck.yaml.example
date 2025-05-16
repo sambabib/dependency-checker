@@ -1,0 +1,31 @@
+# Dependency Checker Configuration
+# Copy this file to .depcheck.yaml to use it
+
+# Exclude patterns for files or directories
+exclude:
+  - node_modules
+  - vendor
+  - .git
+
+# Custom registries for different package managers
+registries:
+  npm: https://registry.npmjs.org
+  nuget: https://api.nuget.org/v3/index.json
+  maven: https://repo.maven.apache.org/maven2
+  pypi: https://pypi.org/pypi
+
+# Severity thresholds for reporting
+severity:
+  major: error    # Major version updates (potentially breaking changes)
+  minor: warning  # Minor version updates (new features, non-breaking)
+  patch: info     # Patch version updates (bug fixes)
+
+# Output configuration
+output:
+  format: text    # Options: text, json, sarif
+  file: ""        # Output file path (stdout if empty)
+
+# Ignore specific packages
+ignorePackages:
+  - some-internal-package
+  - legacy-package

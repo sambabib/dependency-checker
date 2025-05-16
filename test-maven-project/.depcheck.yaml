@@ -1,0 +1,13 @@
+# Test configuration for Maven project
+severity:
+  major: error
+  minor: warning
+  patch: info
+
+output:
+  format: json
+  file: maven-report.json
+
+# Ignore the non-existent package since we know it's just for testing
+ignorePackages:
+  - com.nonexistent:test-package
