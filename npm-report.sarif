@@ -1,0 +1,154 @@
+{
+  "$schema": "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0-rtm.5.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "Dependency Checker",
+          "version": "1.0.0",
+          "informationUri": "https://github.com/sambabib/dependency-checker",
+          "rules": [
+            {
+              "id": "outdated-major",
+              "shortDescription": {
+                "text": "Major version update available"
+              },
+              "fullDescription": {
+                "text": "A major version update is available for this dependency, which may include breaking changes."
+              },
+              "help": {
+                "text": "Consider updating with caution and review the changelog for breaking changes."
+              }
+            },
+            {
+              "id": "outdated-minor",
+              "shortDescription": {
+                "text": "Minor version update available"
+              },
+              "fullDescription": {
+                "text": "A minor version update is available for this dependency, which may include new features."
+              },
+              "help": {
+                "text": "Consider updating to get new features."
+              }
+            },
+            {
+              "id": "outdated-patch",
+              "shortDescription": {
+                "text": "Patch update available"
+              },
+              "fullDescription": {
+                "text": "A patch update is available for this dependency, which may include bug fixes."
+              },
+              "help": {
+                "text": "Consider updating to get bug fixes."
+              }
+            },
+            {
+              "id": "deprecated",
+              "shortDescription": {
+                "text": "Deprecated dependency"
+              },
+              "fullDescription": {
+                "text": "This dependency is marked as deprecated by its maintainers."
+              },
+              "help": {
+                "text": "Consider finding an alternative or replacement package."
+              }
+            },
+            {
+              "id": "incompatible",
+              "shortDescription": {
+                "text": "Incompatible dependency"
+              },
+              "fullDescription": {
+                "text": "This dependency is incompatible with other dependencies in the project."
+              },
+              "help": {
+                "text": "Consider updating to a compatible version."
+              }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "outdated-patch",
+          "level": "note",
+          "message": {
+            "text": "lodash: current version ^4.17.15, latest version 4.17.21"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "test-npm-project"
+                },
+                "region": {}
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "incompatible",
+          "level": "error",
+          "message": {
+            "text": "express: current version 4.17.1, latest version 5.1.0"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "test-npm-project"
+                },
+                "region": {}
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "incompatible",
+          "level": "error",
+          "message": {
+            "text": "nonexistent-npm-package-for-test: current version 1.2.3, latest version fetch error"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "test-npm-project"
+                },
+                "region": {}
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "incompatible",
+          "level": "error",
+          "message": {
+            "text": "react: current version ^16.8.0, latest version 19.1.0"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "test-npm-project"
+                },
+                "region": {}
+              }
+            }
+          ]
+        }
+      ],
+      "invocations": [
+        {
+          "executionSuccessful": true,
+          "startTimeUtc": "2025-05-16T00:11:31Z",
+          "endTimeUtc": "2025-05-16T00:11:32Z"
+        }
+      ]
+    }
+  ]
+}

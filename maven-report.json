@@ -1,0 +1,29 @@
+[
+  {
+    "name": "com.fasterxml.jackson.core:jackson-databind",
+    "current_version": "2.15.2",
+    "latest_version": "2.19.0",
+    "deprecated": false,
+    "compatible": false,
+    "severity": "warning",
+    "notes": "Project version 2.15.2 is older than latest stable 2.19.0 (minor update available)"
+  },
+  {
+    "name": "org.apache.commons:commons-lang3",
+    "current_version": "3.9",
+    "latest_version": "3.17.0",
+    "deprecated": false,
+    "compatible": false,
+    "severity": "warning",
+    "notes": "Project version 3.9 is older than latest stable 3.17.0 (minor update available)"
+  },
+  {
+    "name": "com.nonexistent:test-package",
+    "current_version": "1.0.0",
+    "latest_version": "unknown",
+    "deprecated": false,
+    "compatible": false,
+    "severity": "error",
+    "notes": "Error checking dependency: Maven registry returned status 404 for https://repo.maven.apache.org/maven2/com/nonexistent/test-package/maven-metadata.xml"
+  }
+]

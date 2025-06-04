@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/sambabib/dependency-checker/pkg/logger"
 )
 
 const defaultNpmRegistryURL = "https://registry.npmjs.org"
@@ -33,6 +34,7 @@ type packageJSON struct {
 func (a *NpmAnalyzer) Analyze(path string) ([]ReportItem, error) {
 	// Read package.json
 	filePath := filepath.Join(path, "package.json")
+	logger.Debugf("NPM: Reading package.json from %s", filePath)
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read package.json: %w", err)
@@ -54,6 +56,7 @@ func (a *NpmAnalyzer) Analyze(path string) ([]ReportItem, error) {
 
 	reports := []ReportItem{}
 	for name, currentVersionStr := range allDeps {
+		logger.Debugf("NPM: Analyzing package: %s, version range: %s", name, currentVersionStr)
 		// Fetch latest version and deprecation status from npm registry
 		currentSemver, errParseCurrent := semver.NewVersion(strings.TrimPrefix(currentVersionStr, "^"))
 		if errParseCurrent != nil {
@@ -63,7 +66,8 @@ func (a *NpmAnalyzer) Analyze(path string) ([]ReportItem, error) {
 			if registryURLToUse == "" {
 				registryURLToUse = defaultNpmRegistryURL
 			}
-			resp, err := http.Get(fmt.Sprintf("%s/%s", registryURLToUse, name)) // nosemgrep: go.lang.security.audit.net.gosec.G107.G107
+			logger.Debugf("NPM: Fetching from registry: %s/%s", registryURLToUse, name)
+			resp, err := http.Get(fmt.Sprintf("%s/%s", registryURLToUse, name))
 			if err != nil {
 				reports = append(reports, ReportItem{Name: name, CurrentVersion: currentVersionStr, Severity: "error", Compatible: false, LatestVersion: "fetch error", Deprecated: false})
 				continue
@@ -99,7 +103,8 @@ func (a *NpmAnalyzer) Analyze(path string) ([]ReportItem, error) {
 		if registryURLToUse == "" {
 			registryURLToUse = defaultNpmRegistryURL
 		}
-		resp, err := http.Get(fmt.Sprintf("%s/%s", registryURLToUse, name)) // nosemgrep: go.lang.security.audit.net.gosec.G107.G107
+		logger.Debugf("NPM: Fetching from registry: %s/%s", registryURLToUse, name)
+		resp, err := http.Get(fmt.Sprintf("%s/%s", registryURLToUse, name))
 		if err != nil {
 			reports = append(reports, ReportItem{Name: name, CurrentVersion: currentVersionStr, Severity: "error", Compatible: false, LatestVersion: "fetch error", Deprecated: false})
 			continue

@@ -1,0 +1,13 @@
+# Test configuration for NuGet project
+severity:
+  major: error
+  minor: warning
+  patch: info
+
+output:
+  format: sarif
+  file: nuget-report.sarif
+
+# Ignore the non-existent package since we know it's just for testing
+ignorePackages:
+  - NonExistent.Nuget.Package.For.Test

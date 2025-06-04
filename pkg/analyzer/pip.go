@@ -9,10 +9,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/Masterminds/semver/v3"
-	"github.com/sambabib/dependency-checker/pkg/logger" // <<< ADDED logger import
+	"github.com/sambabib/dependency-checker/pkg/logger"
 )
 
 const defaultPipRegistryURL = "https://pypi.org/pypi"
@@ -73,7 +72,7 @@ type PipReleaseFileInfo struct {
 	PythonVersion   string    `json:"python_version"`
 	RequiresPython  string    `json:"requires_python"`
 	Size            int       `json:"size"`
-	UploadTime      time.Time `json:"upload_time"`
+	UploadTime      string    `json:"upload_time"` // Using string instead of time.Time to avoid parsing issues
 	URL             string    `json:"url"`
 	Yanked          bool      `json:"yanked"`
 	YankedReason    string    `json:"yanked_reason"`

@@ -1,0 +1,27 @@
+[
+  {
+    "name": "django",
+    "current_version": "3.2",
+    "latest_version": "5.2.1",
+    "deprecated": false,
+    "compatible": false,
+    "severity": "error"
+  },
+  {
+    "name": "requests",
+    "current_version": "",
+    "latest_version": "2.32.3",
+    "deprecated": false,
+    "compatible": true,
+    "severity": "info"
+  },
+  {
+    "name": "nonexistent-package-for-test",
+    "current_version": "1.0.0",
+    "latest_version": "not-found",
+    "deprecated": false,
+    "compatible": false,
+    "severity": "error",
+    "notes": "Package not found in registry."
+  }
+]
