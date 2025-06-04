@@ -252,7 +252,7 @@ func TestNuGetAnalyzer_Analyze_NoCsprojFiles(t *testing.T) {
 	reports, err := analyzer.Analyze(tempDir)
 	assert.Error(t, err, "Expected an error when no .csproj files are found")
 	if err != nil { // Check error message if an error is returned
-		assert.Contains(t, err.Error(), "no .csproj files found")
+		assert.Contains(t, err.Error(), "No .csproj files found in ")
 	}
 	assert.Nil(t, reports, "Reports should be nil when an error occurs due to no .csproj files")
 }

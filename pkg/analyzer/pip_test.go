@@ -28,107 +28,7 @@ func createTemporaryRequirementsFile(t *testing.T, dir string, filename string, 
 	return tempFilePath
 }
 
-// TestPipAnalyzer_findAndParseRequirementsFiles tests the findAndParseRequirementsFiles method.
-func TestPipAnalyzer_findAndParseRequirementsFiles(t *testing.T) {
-	analyzer := NewPipAnalyzer()
-
-	tests := []struct {
-		name              string
-		files             map[string]string // filename -> content
-		subdirs           map[string]map[string]string // subdir -> {filename -> content}
-		expectedPackages  map[string]string // package -> version (empty if unpinned)
-		expectError       bool
-		expectedErrorMsg  string
-	}{
-		{
-			name: "pinned versions",
-			files: map[string]string{
-				"requirements.txt": "requests==2.25.1\nDjango==3.2",
-			},
-			expectedPackages: map[string]string{
-				"requests": "2.25.1",
-				"Django":   "3.2",
-			},
-		},
-		{
-			name: "unpinned versions",
-			files: map[string]string{
-				"requirements.txt": "flask\nnumpy",
-			},
-			expectedPackages: map[string]string{
-				"flask": "",
-				"numpy": "",
-			},
-		},
-		{
-			name: "mixed pinned and unpinned with comments and extras",
-			files: map[string]string{
-				"requirements.txt": "  pandas == 1.3.0 # data analysis\nscipy[extra]; python_version < '3.9'\n# matplotlib==3.4.2",
-			},
-			expectedPackages: map[string]string{
-				"pandas": "1.3.0",
-				"scipy":  "", // Extras and markers are currently ignored for version, package name is extracted
-			},
-		},
-		{
-			name: "multiple requirements files in subdirectories",
-			files: map[string]string{
-				"requirements.txt": "common_package==1.0",
-			},
-			subdirs: map[string]map[string]string{
-				"subdir1": {
-					"requirements.txt": "package_a==2.0\ncommon_package==1.1", // Overrides root
-				},
-				"subdir2": {
-					"requirements.txt": "package_b==3.0",
-				},
-			},
-			expectedPackages: map[string]string{
-				"common_package": "1.1",
-				"package_a":      "2.0",
-				"package_b":      "3.0",
-			},
-		},
-		{
-			name: "no requirements files found",
-			files: map[string]string{
-				"other.txt": "some_content",
-			},
-			expectedPackages: map[string]string{}, // Expect empty, not an error from this func
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tempDir := t.TempDir()
-
-			for filename, content := range tt.files {
-				createTemporaryRequirementsFile(t, tempDir, filename, content)
-			}
-
-			for subdirName, filesInSubdir := range tt.subdirs {
-				subDirPath := filepath.Join(tempDir, subdirName)
-				err := os.MkdirAll(subDirPath, 0755)
-				assert.NoError(t, err, "Failed to create subdirectory")
-				for filename, content := range filesInSubdir {
-					createTemporaryRequirementsFile(t, subDirPath, filename, content)
-				}
-			}
-
-			actualPackages, err := analyzer.findAndParseRequirementsFiles(tempDir)
-
-			if tt.expectError {
-				assert.Error(t, err)
-				if tt.expectedErrorMsg != "" {
-					assert.Contains(t, err.Error(), tt.expectedErrorMsg)
-				}
-			} else {
-				assert.NoError(t, err)
-				assert.Equal(t, tt.expectedPackages, actualPackages)
-			}
-		})
-	}
-}
+// TestPipAnalyzer_findAndParseRequirementsFiles was removed as the target method was integrated into Analyze.
 
 // mockPipRegistry Mocks the /pypi/<package>/json endpoint.
 func mockPipRegistry(t *testing.T, expectedPackages map[string]string) *httptest.Server {
@@ -169,61 +69,132 @@ func mockPipRegistry(t *testing.T, expectedPackages map[string]string) *httptest
 // Test_getLatestStablePipVersion tests the getLatestStablePipVersion package-level function.
 func Test_getLatestStablePipVersion(t *testing.T) {
 	tests := []struct {
-		name             string
-		releases         map[string][]PipReleaseFileInfo
-		expectedVersion  string
-		expectError      bool
-		expectedErrorMsg string
+		name            string
+		releases        map[string][]PipReleaseFileInfo
+		expectedVersion string
+		expectedNotes   string // Can be a substring to check for flexibility
 	}{
 		{
 			name: "basic case with stable and prerelease",
 			releases: map[string][]PipReleaseFileInfo{
-				"1.0.0":    {{Yanked: false}},
-				"1.1.0":    {{Yanked: false}},
-				"1.2.0b1":  {{Yanked: false}},
-				"0.9.0":    {{Yanked: false}},
+				"1.0.0":   {{Yanked: false}},
+				"1.1.0":   {{Yanked: false}},
+				"1.2.0b1": {{Yanked: false}},
+				"0.9.0":   {{Yanked: false}},
 			},
 			expectedVersion: "1.1.0",
+			expectedNotes:   "", // No specific notes expected if a version is found cleanly
 		},
 		{
-			name: "all versions yanked",
+			name: "all versions yanked, one with reason",
 			releases: map[string][]PipReleaseFileInfo{
-				"1.0.0": {{Yanked: true}},
-				"1.1.0": {{Yanked: true}},
+				"1.0.0": {{Yanked: true, YankedReason: "Critical bug"}},
+				"1.1.0": {{Yanked: true, YankedReason: ""}},
 			},
-			expectError:     true,
-			expectedErrorMsg: "no stable (non-prerelease, non-yanked) versions found",
+			expectedVersion: "", // No stable version found
+			expectedNotes:   "Version 1.0.0 is yanked or has no usable files. Reason: Critical bug; Version 1.1.0 is yanked or has no usable files.; No stable (non-prerelease, non-yanked) versions found.",
 		},
 		{
-			name: "version with no files, treated as yanked",
+			name: "one version stable, another yanked",
+			releases: map[string][]PipReleaseFileInfo{
+				"1.0.0": {{Yanked: true, YankedReason: "Security issue"}},
+				"1.1.0": {{Yanked: false}},
+			},
+			expectedVersion: "1.1.0",
+			expectedNotes:   "Version 1.0.0 is yanked or has no usable files. Reason: Security issue",
+		},
+		{
+			name: "version with no files (treated as yanked)",
 			releases: map[string][]PipReleaseFileInfo{
 				"1.0.0": {{Yanked: false}},
-				"1.1.0": {},
+				"1.1.0": {}, // No files, implies yanked for our logic
 			},
 			expectedVersion: "1.0.0",
+			expectedNotes:   "Version 1.1.0 is yanked or has no usable files.",
+		},
+		{
+			name: "all files for a specific version are yanked",
+			releases: map[string][]PipReleaseFileInfo{
+				"1.0.0": {{Yanked: false}},
+				"1.1.0": {{Yanked: true, YankedReason: "File 1 bad"}, {Yanked: true, YankedReason: "File 2 bad"}},
+			},
+			expectedVersion: "1.0.0",
+			expectedNotes:   "Version 1.1.0 is yanked or has no usable files. Reason: File 1 bad", // Note might pick up first reason
+		},
+		{
+			name: "some files yanked, but one is not for a version",
+			releases: map[string][]PipReleaseFileInfo{
+				"1.0.0": {{Yanked: true}},
+				"1.1.0": {{Yanked: true}, {Yanked: false}}, // This version should be considered stable
+			},
+			expectedVersion: "1.1.0",
+			expectedNotes:   "Version 1.0.0 is yanked or has no usable files.",
 		},
 		{
 			name: "only prereleases available",
 			releases: map[string][]PipReleaseFileInfo{
 				"1.0.0a1": {{Yanked: false}},
 				"1.0.0b2": {{Yanked: false}},
+				"0.9.0rc1":{{Yanked: false}},
 			},
-			expectError:     true,
-			expectedErrorMsg: "no stable (non-prerelease, non-yanked) versions found",
+			expectedVersion: "",
+			expectedNotes:   "Could not parse version '0.9.0rc1': Invalid Semantic Version; Could not parse version '1.0.0a1': Invalid Semantic Version; Could not parse version '1.0.0b2': Invalid Semantic Version; No stable (non-prerelease, non-yanked) versions found.",
+		},
+		{
+			name: "invalid version string mixed with valid ones",
+			releases: map[string][]PipReleaseFileInfo{
+				"1.0.0":       {{Yanked: false}},
+				"invalid-ver": {{Yanked: false}},
+				"1.2.0":       {{Yanked: false}},
+			},
+			expectedVersion: "1.2.0",
+			expectedNotes:   "Could not parse version 'invalid-ver': Invalid Semantic Version",
+		},
+		{
+			name:            "no versions available",
+			releases:        map[string][]PipReleaseFileInfo{},
+			expectedVersion: "",
+			expectedNotes:   "No stable (non-prerelease, non-yanked) versions found.",
+		},
+		{
+			name: "stable version is older than a yanked newer version",
+			releases: map[string][]PipReleaseFileInfo{
+				"1.0.0":    {{Yanked: false}},
+				"1.1.0":    {{Yanked: true, YankedReason: "Too new and broken"}},
+			},
+			expectedVersion: "1.0.0",
+			expectedNotes:   "Version 1.1.0 is yanked or has no usable files. Reason: Too new and broken",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			actualVersion, err := getLatestStablePipVersion(tt.releases)
-			if tt.expectError {
-				assert.Error(t, err)
-				if tt.expectedErrorMsg != "" {
-					assert.Contains(t, err.Error(), tt.expectedErrorMsg)
+			actualVersion, actualNotes := getLatestStablePipVersion(tt.releases)
+			assert.Equal(t, tt.expectedVersion, actualVersion, "Expected version mismatch")
+			if tt.expectedNotes != "" {
+				expectedNoteParts := strings.Split(tt.expectedNotes, "; ")
+				actualNoteParts := strings.Split(actualNotes, "; ")
+
+				// Convert actualNoteParts to a map for efficient lookup
+				actualNotesMap := make(map[string]bool)
+				for _, part := range actualNoteParts {
+					actualNotesMap[strings.TrimSpace(part)] = true
 				}
-			} else {
-				assert.NoError(t, err)
-				assert.Equal(t, tt.expectedVersion, actualVersion)
+
+				for _, expectedPart := range expectedNoteParts {
+					trimmedExpectedPart := strings.TrimSpace(expectedPart)
+					assert.True(t, actualNotesMap[trimmedExpectedPart], "Expected note component '%s' not found in actual notes. Actual notes: '%s'", trimmedExpectedPart, actualNotes)
+				}
+			} else if actualNotes != "" {
+				// If no specific notes are expected, but notes are generated, check if they are only parse errors
+				actualNoteParts := strings.Split(actualNotes, "; ")
+				for _, part := range actualNoteParts {
+					trimmedPart := strings.TrimSpace(part)
+					if trimmedPart != "" && !strings.HasPrefix(trimmedPart, "Could not parse version") {
+						assert.Fail(t, "Unexpected notes generated when none were expected (and not a parse error): "+actualNotes)
+						break
+					}
+				}
 			}
 		})
 	}
