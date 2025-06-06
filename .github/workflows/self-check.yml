@@ -11,6 +11,9 @@ on:
 jobs:
   check-dependencies:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read # for actions/checkout
+      security-events: write # for github/codeql-action/upload-sarif
     steps:
       - name: Checkout
         uses: actions/checkout@v4
