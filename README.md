@@ -324,7 +324,7 @@ Contributions are welcome! Please feel free to submit pull requests or open issu
 
 MIT License
 
-Copyright (c) 2025 Emmanuel Akala
+Copyright (c) 2025 samuraikitts
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
