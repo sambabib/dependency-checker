@@ -1,5 +1,7 @@
 # Dependency Checker CLI
 
+[![Self Check Status](https://github.com/sambabib/dependency-checker/actions/workflows/self-check.yml/badge.svg)](https://github.com/sambabib/dependency-checker/actions/workflows/self-check.yml)
+
 A command-line tool to analyze project dependencies and report outdated, incompatible, or problematic packages across multiple package ecosystems.
 
 ## Features
@@ -17,7 +19,7 @@ A command-line tool to analyze project dependencies and report outdated, incompa
   * Validates compatibility (peer dependencies, framework compatibility)
 
 * **Flexible Output Options**:
-  * Human-readable table format
+  * Readable table format
   * JSON for programmatic processing
   * SARIF for CI/CD integration
   * File output support
@@ -52,17 +54,6 @@ A command-line tool to analyze project dependencies and report outdated, incompa
    # Windows (run in PowerShell as Administrator)
    # Move to a directory in your PATH
    ```
-
-### From Releases (Coming Soon)
-
-* **Linux/macOS**:
-  ```bash
-  curl -L https://github.com/sambabib/dependency-checker/releases/latest/download/depcheck-$(uname -s)-$(uname -m) -o /usr/local/bin/depcheck
-  chmod +x /usr/local/bin/depcheck
-  ```
-
-* **Windows**:
-  Download the latest release from the [Releases page](https://github.com/sambabib/dependency-checker/releases) and add it to your PATH.
 
 ## Usage
 
@@ -333,7 +324,7 @@ Contributions are welcome! Please feel free to submit pull requests or open issu
 
 MIT License
 
-Copyright (c) 2025 Samba Bib
+Copyright (c) 2025 Emmanuel Akala
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
